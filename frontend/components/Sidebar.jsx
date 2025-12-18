@@ -58,6 +58,7 @@ export default function Sidebar({ setSelectedChat, selectedChat }) {
 
   // 3. START/ACCESS CHAT FUNCTION
   const startChat = async (recipientId) => {
+     const API_URL = import.meta.env.VITE_BACKEND_URL || "http://localhost:5000";
     try {
       const res = await axios.post(`${API_URL}/api/chats/access`, 
         { recipientId }, 
