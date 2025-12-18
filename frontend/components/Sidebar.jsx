@@ -5,10 +5,16 @@ import { useSocket } from '../src/context/SocketContext';
 import { useAuth } from '../src/context/AuthContext';
 
 // OPTIMIZATION: Memoize Individual Chat Items
-// This prevents the entire list from re-rendering when you type in the search bar.
 const ChatItem = memo(({ chat, isActive, isOnline, onClick, formatTime, currentUser }) => {
   const otherUser = chat.participants.find(p => p._id !== currentUser?._id);
   
+  // LOGIC: Formatter for unread counts (e.g., 10 -> 9+, 100 -> 99+)
+  const formatUnreadCount = (count) => {
+    if (count > 99) return "99+";
+    if (count > 9) return "9+";
+    return count;
+  };
+
   return (
     <div 
       onClick={onClick}
@@ -43,11 +49,13 @@ const ChatItem = memo(({ chat, isActive, isOnline, onClick, formatTime, currentU
           <p className={`text-xs truncate max-w-[180px] ${isActive ? 'text-blue-100/80' : 'text-zinc-500'}`}>
             {chat.lastMessage?.text || "New Signal established"}
           </p>
+          
           {isActive ? (
             <CheckCheck className="w-3 h-3 text-blue-400 ml-2" />
           ) : chat.unreadCount > 0 ? (
-            <div className="bg-blue-600 text-white text-[9px] font-black px-1.5 py-0.5 rounded-full min-w-[18px] text-center ml-2">
-              {chat.unreadCount}
+            /* UPDATED BADGE DESIGN */
+            <div className="bg-blue-600 text-white text-[9px] font-black px-1.5 py-0.5 rounded-full min-w-[20px] h-[18px] flex items-center justify-center ml-2 shadow-lg shadow-blue-600/20 border border-white/10">
+              {formatUnreadCount(chat.unreadCount)}
             </div>
           ) : null}
         </div>
@@ -57,6 +65,7 @@ const ChatItem = memo(({ chat, isActive, isOnline, onClick, formatTime, currentU
 });
 
 export default function Sidebar({ setSelectedChat, selectedChat }) {
+  // ... (Keep the rest of your Sidebar component exactly as it was)
   const { user: currentUser } = useAuth();
   const { onlineUsers } = useSocket();
 
@@ -127,7 +136,6 @@ export default function Sidebar({ setSelectedChat, selectedChat }) {
           </button>
         </div>
         
-        {/* --- Search --- */}
         <div className="relative group">
           <Search className={`absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 transition-all duration-300 ${search ? 'text-blue-500 scale-110' : 'text-zinc-600'}`} />
           <input 
@@ -140,32 +148,8 @@ export default function Sidebar({ setSelectedChat, selectedChat }) {
         </div>
       </div>
 
-      {/* --- Search Results Overlay --- */}
-      {search.length > 0 && (
-        <div className="absolute top-28 left-4 right-4 bg-zinc-900/95 border border-white/10 rounded-2xl shadow-2xl z-50 max-h-[400px] overflow-y-auto backdrop-blur-xl">
-          {isSearching ? (
-            <div className="p-8 flex justify-center"><Loader2 className="animate-spin text-blue-500 w-5 h-5" /></div>
-          ) : searchResults.length > 0 ? (
-            searchResults.map(u => (
-              <div key={u._id} onClick={() => startChat(u._id)} className="p-4 hover:bg-blue-600/10 cursor-pointer flex items-center gap-3 border-b border-white/5 last:border-0">
-                <div className="w-10 h-10 bg-zinc-800 rounded-xl flex items-center justify-center text-blue-500 font-bold border border-white/5">{u.username[0].toUpperCase()}</div>
-                <div className="flex-1 min-w-0">
-                  <div className="text-sm font-bold text-white">{u.username}</div>
-                  <div className="text-[10px] text-zinc-500 font-medium uppercase tracking-tighter">{u.email}</div>
-                </div>
-                <UserPlus className="w-4 h-4 text-zinc-600 hover:text-blue-500 transition-colors" />
-              </div>
-            ))
-          ) : (
-            <div className="p-8 text-center text-zinc-600 text-[10px] font-black uppercase tracking-widest">No Signals Found</div>
-          )}
-        </div>
-      )}
-
-      {/* --- Conversation List --- */}
       <div className="flex-1 overflow-y-auto mt-2 custom-scrollbar">
         {loading ? (
-          // SKELETON LOADERS
           [1, 2, 3, 4, 5].map(i => (
             <div key={i} className="flex items-center gap-4 px-6 py-4 animate-pulse">
               <div className="w-12 h-12 bg-zinc-900 rounded-2xl" />
