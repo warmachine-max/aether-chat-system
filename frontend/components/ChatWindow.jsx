@@ -1,53 +1,84 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import axios from 'axios';
-import { Send, ShieldCheck, Hash } from 'lucide-react';
+import { Send, ShieldCheck, Hash, Circle, Info, Phone, Video } from 'lucide-react';
 import { useSocket } from '../src/context/SocketContext';
 import { useAuth } from '../src/context/AuthContext';
 
 export default function ChatWindow({ chat }) {
   const { user } = useAuth();
-  const { socket } = useSocket();
+  const { socket, onlineUsers } = useSocket();
   const [messages, setMessages] = useState([]);
   const [newMessage, setNewMessage] = useState('');
+  const [isTyping, setIsTyping] = useState(false);
+  const [otherUserTyping, setOtherUserTyping] = useState(false);
   const scrollRef = useRef();
 
-  // 1. Load history from Bucket
+  const otherUser = useMemo(() => 
+    chat.participants.find(p => p._id !== user._id), 
+  [chat, user._id]);
+
+  const isOtherUserOnline = onlineUsers.includes(otherUser?._id);
+
+  // 1. Fetch History
   useEffect(() => {
     const API_URL = import.meta.env.VITE_BACKEND_URL || "http://localhost:5000";
     const fetchMessages = async () => {
       try {
-        const res = await axios.get(`${API_URL}/api/chats/${chat._id}`, {
-          withCredentials: true,
-        });
+        const res = await axios.get(`${API_URL}/api/chats/${chat._id}`, { withCredentials: true });
         setMessages(res.data);
-      } catch (err) {
-        console.error("Fetch Messages Error:", err);
-      }
+      } catch (err) { console.error(err); }
     };
     fetchMessages();
     socket?.emit('join_chat', chat._id);
-  }, [chat._id, socket]); // Added chat._id to dependency for stability
+  }, [chat._id, socket]);
 
-  // 2. Listen for real-time messages
+  // 2. Socket Listeners (Messages & Typing)
   useEffect(() => {
     if (!socket) return;
+
     socket.on('receive_message', (msg) => {
-      // Only add if it belongs to this chat and isn't a duplicate of our own local update
       if (msg.chatId === chat._id) {
         setMessages((prev) => {
-          // Check if message already exists (prevents double messages for the sender)
           const exists = prev.find(m => m.timestamp === msg.timestamp && m.text === msg.text);
           return exists ? prev : [...prev, msg];
         });
+        setOtherUserTyping(false);
       }
     });
-    return () => socket.off('receive_message');
+
+    socket.on('typing_status', ({ chatId, typing }) => {
+      if (chatId === chat._id) setOtherUserTyping(typing);
+    });
+
+    return () => {
+      socket.off('receive_message');
+      socket.off('typing_status');
+    };
   }, [socket, chat._id]);
 
-  // 3. Auto-scroll to bottom whenever messages change
+  // 3. Auto-scroll
   useEffect(() => {
     scrollRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+  }, [messages, otherUserTyping]);
+
+  // 4. Typing Handler
+  const handleInputChange = (e) => {
+    setNewMessage(e.target.value);
+    if (!isTyping) {
+      setIsTyping(true);
+      socket.emit('typing', { chatId: chat._id, typing: true });
+    }
+    
+    // Stop typing timeout
+    const lastTypingTime = new Date().getTime();
+    setTimeout(() => {
+      const timeNow = new Date().getTime();
+      if (timeNow - lastTypingTime >= 2000 && isTyping) {
+        socket.emit('typing', { chatId: chat._id, typing: false });
+        setIsTyping(false);
+      }
+    }, 2000);
+  };
 
   const handleSend = (e) => {
     e.preventDefault();
@@ -57,72 +88,106 @@ export default function ChatWindow({ chat }) {
       chatId: chat._id,
       senderId: user._id,
       text: newMessage,
-      timestamp: new Date().toISOString(), // Generate timestamp immediately
+      timestamp: new Date().toISOString(),
     };
 
-    // Emit to server
     socket.emit('send_message', msgData);
-
-    // Update UI instantly for the sender (Zero-lag)
+    socket.emit('typing', { chatId: chat._id, typing: false });
     setMessages((prev) => [...prev, msgData]);
     setNewMessage('');
+    setIsTyping(false);
   };
 
   return (
-    <div className="flex flex-col h-full bg-[#050505]">
-      {/* Top Bar */}
-      <div className="p-6 border-b border-white/5 flex justify-between items-center backdrop-blur-md bg-black/20">
-        <div className="flex items-center gap-3">
-          <div className="p-2 bg-zinc-900 rounded-xl border border-white/10">
-            <Hash className="w-5 h-5 text-blue-500" />
+    <div className="flex flex-col h-full bg-[#050505] text-zinc-100">
+      {/* --- Top Bar --- */}
+      <div className="px-6 py-4 border-b border-white/5 flex justify-between items-center backdrop-blur-xl bg-black/40 sticky top-0 z-10">
+        <div className="flex items-center gap-4">
+          <div className="relative">
+            <div className="w-10 h-10 bg-zinc-900 rounded-full flex items-center justify-center border border-white/10 font-bold text-blue-500">
+              {otherUser?.username?.[0].toUpperCase()}
+            </div>
+            {isOtherUserOnline && (
+              <div className="absolute -bottom-0.5 -right-0.5 w-3 h-3 bg-green-500 rounded-full border-2 border-[#050505]" />
+            )}
           </div>
-          <h2 className="font-bold text-xl">
-            {chat.participants.find(p => p._id !== user._id)?.username || "Chat"}
-          </h2>
+          <div>
+            <h2 className="font-bold text-sm tracking-tight">{otherUser?.username || "Secure Line"}</h2>
+            <p className="text-[10px] text-zinc-500 uppercase tracking-widest font-black">
+              {isOtherUserOnline ? 'Online' : 'Encrypted'}
+            </p>
+          </div>
         </div>
-        <ShieldCheck className="text-zinc-600 w-5 h-5" />
+        <div className="flex items-center gap-4 text-zinc-500">
+           <Phone className="w-4 h-4 hover:text-blue-500 cursor-pointer transition-colors" />
+           <Video className="w-4 h-4 hover:text-blue-500 cursor-pointer transition-colors" />
+           <Info className="w-4 h-4 hover:text-blue-500 cursor-pointer transition-colors" />
+        </div>
       </div>
 
-      {/* Messages Area */}
-      <div className="flex-1 overflow-y-auto p-6 space-y-6">
+      {/* --- Message Container --- */}
+      <div className="flex-1 overflow-y-auto px-6 py-8 space-y-2 custom-scrollbar">
+        {messages.length === 0 && (
+            <div className="h-full flex flex-col items-center justify-center text-center opacity-30">
+                <ShieldCheck className="w-12 h-12 mb-4 text-zinc-700" />
+                <p className="text-[10px] uppercase tracking-[0.3em] font-bold">End-to-End Encrypted Signal Established</p>
+            </div>
+        )}
+
         {messages.map((m, i) => {
           const isMe = m.senderId === user._id;
-          const time = m.timestamp 
-            ? new Date(m.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) 
-            : "";
+          const showTime = i === messages.length - 1 || messages[i+1]?.senderId !== m.senderId;
+          const time = new Date(m.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
           return (
-            <div key={i} className={`flex flex-col ${isMe ? 'items-end' : 'items-start'}`}>
-              <div className={`max-w-[70%] p-4 rounded-3xl text-sm ${
+            <div key={i} className={`flex flex-col ${isMe ? 'items-end' : 'items-start'} ${showTime ? 'mb-4' : 'mb-1'}`}>
+              <div className={`px-4 py-2.5 rounded-2xl text-[13.5px] leading-relaxed shadow-sm transition-all ${
                 isMe 
                 ? 'bg-blue-600 text-white rounded-tr-none' 
                 : 'bg-zinc-900 text-zinc-100 rounded-tl-none border border-white/5'
               }`}>
                 {m.text}
               </div>
-              {/* Timestamp label */}
-              <span className="text-[10px] text-zinc-500 mt-1 px-2 uppercase tracking-widest font-medium">
-                {time}
-              </span>
+              {showTime && (
+                <span className="text-[9px] text-zinc-600 mt-1 px-1 font-bold uppercase tracking-tighter">
+                  {time}
+                </span>
+              )}
             </div>
           );
         })}
+
+        {/* Typing Indicator */}
+        {otherUserTyping && (
+          <div className="flex flex-col items-start mb-4">
+            <div className="bg-zinc-900 border border-white/5 px-4 py-3 rounded-2xl rounded-tl-none">
+              <div className="flex gap-1">
+                <div className="w-1.5 h-1.5 bg-zinc-600 rounded-full animate-bounce" />
+                <div className="w-1.5 h-1.5 bg-zinc-600 rounded-full animate-bounce [animation-delay:0.2s]" />
+                <div className="w-1.5 h-1.5 bg-zinc-600 rounded-full animate-bounce [animation-delay:0.4s]" />
+              </div>
+            </div>
+          </div>
+        )}
         <div ref={scrollRef} />
       </div>
 
-      {/* Input Area */}
-      <form onSubmit={handleSend} className="p-6 bg-zinc-950/50">
-        <div className="relative">
-          <input 
-            type="text"
-            className="w-full bg-zinc-900 border border-white/10 rounded-[2rem] py-4 pl-6 pr-16 focus:outline-none focus:ring-2 focus:ring-blue-500/20 transition-all text-white placeholder:text-zinc-600"
-            placeholder="Transmit message..."
-            value={newMessage}
-            onChange={(e) => setNewMessage(e.target.value)}
-          />
+      {/* --- Input --- */}
+      <form onSubmit={handleSend} className="p-6 bg-[#050505]">
+        <div className="relative flex items-center gap-3">
+          <div className="flex-1 relative">
+            <input 
+              type="text"
+              className="w-full bg-zinc-900/50 border border-white/5 rounded-2xl py-4 pl-6 pr-4 focus:outline-none focus:ring-1 focus:ring-blue-500/50 transition-all text-sm text-white placeholder:text-zinc-700"
+              placeholder="Enter message signal..."
+              value={newMessage}
+              onChange={handleInputChange}
+            />
+          </div>
           <button 
             type="submit" 
-            className="absolute right-2 top-1/2 -translate-y-1/2 p-3 bg-blue-600 rounded-full hover:bg-blue-500 transition-colors shadow-lg shadow-blue-500/20"
+            disabled={!newMessage.trim()}
+            className="p-4 bg-blue-600 rounded-2xl hover:bg-blue-500 disabled:opacity-50 disabled:bg-zinc-800 transition-all shadow-lg shadow-blue-600/20"
           >
             <Send className="w-4 h-4 text-white" />
           </button>
