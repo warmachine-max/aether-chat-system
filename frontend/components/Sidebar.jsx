@@ -1,19 +1,22 @@
 import React, { useState, useEffect, useMemo, memo } from 'react';
 import axios from 'axios';
-import { Search, Circle, UserPlus, Loader2, CheckCheck, MessageSquarePlus } from 'lucide-react';
+import { Search, UserPlus, Loader2, CheckCheck, MessageSquarePlus } from 'lucide-react';
 import { useSocket } from '../src/context/SocketContext';
 import { useAuth } from '../src/context/AuthContext';
 
-// OPTIMIZATION: Memoize Individual Chat Items
+// --- Sub-Component: ChatItem ---
 const ChatItem = memo(({ chat, isActive, isOnline, onClick, formatTime, currentUser }) => {
   const otherUser = chat.participants.find(p => p._id !== currentUser?._id);
   
-  // LOGIC: Formatter for unread counts (e.g., 10 -> 9+, 100 -> 99+)
+  // Logic to format unread count (e.g., 10 -> 9+, 100 -> 99+)
   const formatUnreadCount = (count) => {
+    if (!count || count <= 0) return null;
     if (count > 99) return "99+";
     if (count > 9) return "9+";
     return count;
   };
+
+  const unreadDisplay = formatUnreadCount(chat.unreadCount);
 
   return (
     <div 
@@ -31,14 +34,14 @@ const ChatItem = memo(({ chat, isActive, isOnline, onClick, formatTime, currentU
           {otherUser?.username?.[0].toUpperCase()}
         </div>
         {isOnline && (
-          <div className="absolute -top-1 -right-1 w-3.5 h-3.5 bg-green-500 rounded-full border-[3px] border-[#0a0a0a]" />
+          <div className="absolute -top-1 -right-1 w-3.5 h-3.5 bg-green-500 rounded-full border-[3px] border-[#070707]" />
         )}
       </div>
       
       <div className="flex-1 min-w-0">
         <div className="flex justify-between items-center mb-0.5">
           <h3 className={`font-bold truncate text-[14px] ${isActive ? 'text-white' : 'text-zinc-200'}`}>
-            {otherUser?.username || "Unknown"}
+            {otherUser?.username || "Unknown User"}
           </h3>
           <span className="text-[10px] text-zinc-500 font-medium whitespace-nowrap">
             {formatTime(chat.updatedAt)}
@@ -46,28 +49,29 @@ const ChatItem = memo(({ chat, isActive, isOnline, onClick, formatTime, currentU
         </div>
         
         <div className="flex justify-between items-center">
-          <p className={`text-xs truncate max-w-[180px] ${isActive ? 'text-blue-100/80' : 'text-zinc-500'}`}>
-            {chat.lastMessage?.text || "New Signal established"}
+          <p className={`text-xs truncate max-w-[150px] ${isActive ? 'text-blue-100/80' : 'text-zinc-500'}`}>
+            {chat.lastMessage?.text || "Started a new conversation"}
           </p>
           
-          {isActive ? (
-            <CheckCheck className="w-3 h-3 text-blue-400 ml-2" />
-          ) : chat.unreadCount > 0 ? (
-            /* UPDATED BADGE DESIGN */
-            <div className="bg-blue-600 text-white text-[9px] font-black px-1.5 py-0.5 rounded-full min-w-[20px] h-[18px] flex items-center justify-center ml-2 shadow-lg shadow-blue-600/20 border border-white/10">
-              {formatUnreadCount(chat.unreadCount)}
-            </div>
-          ) : null}
+          <div className="flex items-center gap-2">
+            {isActive ? (
+              <CheckCheck className="w-3.5 h-3.5 text-blue-400" />
+            ) : unreadDisplay ? (
+              <div className="bg-blue-600 text-white text-[9px] font-black px-1.5 py-0.5 rounded-full min-w-[20px] h-[18px] flex items-center justify-center shadow-lg shadow-blue-600/20 border border-white/10 animate-in zoom-in duration-300">
+                {unreadDisplay}
+              </div>
+            ) : null}
+          </div>
         </div>
       </div>
     </div>
   );
 });
 
+// --- Main Component: Sidebar ---
 export default function Sidebar({ setSelectedChat, selectedChat }) {
-  // ... (Keep the rest of your Sidebar component exactly as it was)
   const { user: currentUser } = useAuth();
-  const { onlineUsers } = useSocket();
+  const { socket, onlineUsers } = useSocket();
 
   const [search, setSearch] = useState('');
   const [searchResults, setSearchResults] = useState([]);
@@ -77,28 +81,47 @@ export default function Sidebar({ setSelectedChat, selectedChat }) {
 
   const API_URL = useMemo(() => import.meta.env.VITE_BACKEND_URL || "http://localhost:5000", []);
 
-  const formatTime = (date) => {
-    if (!date) return "";
-    const now = new Date();
-    const msgDate = new Date(date);
-    const diffInDays = Math.floor((now - msgDate) / (1000 * 60 * 60 * 24));
-    if (diffInDays === 0) return msgDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    if (diffInDays === 1) return "Yesterday";
-    if (diffInDays < 7) return msgDate.toLocaleDateString([], { weekday: 'short' });
-    return msgDate.toLocaleDateString([], { day: '2-digit', month: '2-digit' });
-  };
-
+  // 1. Initial Fetch
   useEffect(() => {
     const fetchChats = async () => {
       try {
         const res = await axios.get(`${API_URL}/api/chats`, { withCredentials: true });
         setConversations(res.data);
-      } catch (err) { console.error(err); }
-      finally { setLoading(false); }
+      } catch (err) {
+        console.error("Fetch Error:", err);
+      } finally {
+        setLoading(false);
+      }
     };
     fetchChats();
-  }, [selectedChat, search, API_URL]);
+  }, [API_URL]);
 
+  // 2. Real-time Message/Unread Handling
+  useEffect(() => {
+    if (!socket) return;
+
+    socket.on('receive_message', (msg) => {
+      setConversations((prev) => {
+        return prev.map((chat) => {
+          if (chat._id === msg.chatId) {
+            // Increment unread if chat is not currently selected
+            const isCurrentlyOpen = selectedChat?._id === chat._id;
+            return {
+              ...chat,
+              lastMessage: msg,
+              updatedAt: new Date().toISOString(),
+              unreadCount: isCurrentlyOpen ? 0 : (chat.unreadCount || 0) + 1
+            };
+          }
+          return chat;
+        }).sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
+      });
+    });
+
+    return () => socket.off('receive_message');
+  }, [socket, selectedChat]);
+
+  // 3. Search Logic
   useEffect(() => {
     const searchUsers = async () => {
       if (search.trim().length < 2) { setSearchResults([]); return; }
@@ -119,12 +142,24 @@ export default function Sidebar({ setSelectedChat, selectedChat }) {
       setSelectedChat(res.data);
       setSearch('');
       setSearchResults([]);
+      // Reset unread for the selected chat
+      setConversations(prev => prev.map(c => c._id === res.data._id ? {...c, unreadCount: 0} : c));
     } catch (err) { console.error("Signal failed"); }
+  };
+
+  const formatTime = (date) => {
+    if (!date) return "";
+    const now = new Date();
+    const msgDate = new Date(date);
+    const diffInDays = Math.floor((now - msgDate) / (1000 * 60 * 60 * 24));
+    if (diffInDays === 0) return msgDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    if (diffInDays === 1) return "Yesterday";
+    return msgDate.toLocaleDateString([], { day: '2-digit', month: '2-digit' });
   };
 
   return (
     <div className="flex flex-col h-full bg-[#070707] border-r border-white/5 w-[360px] relative">
-      {/* --- Header --- */}
+      {/* Header */}
       <div className="p-6 pb-4">
         <div className="flex justify-between items-center mb-6">
           <div className="flex items-center gap-2">
@@ -136,18 +171,42 @@ export default function Sidebar({ setSelectedChat, selectedChat }) {
           </button>
         </div>
         
+        {/* Search Input */}
         <div className="relative group">
           <Search className={`absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 transition-all duration-300 ${search ? 'text-blue-500 scale-110' : 'text-zinc-600'}`} />
           <input 
             type="text"
             placeholder="Search signals..."
-            className="w-full bg-zinc-900/40 border border-white/5 rounded-2xl py-3 pl-12 pr-4 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:bg-zinc-900/80 transition-all placeholder:text-zinc-700"
+            className="w-full bg-zinc-900/40 border border-white/5 rounded-2xl py-3 pl-12 pr-4 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:bg-zinc-900/80 transition-all text-white placeholder:text-zinc-700"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
         </div>
       </div>
 
+      {/* Search Overlay */}
+      {search.length > 0 && (
+        <div className="absolute top-28 left-4 right-4 bg-zinc-900/95 border border-white/10 rounded-2xl shadow-2xl z-50 max-h-[400px] overflow-y-auto backdrop-blur-xl">
+          {isSearching ? (
+            <div className="p-8 flex justify-center"><Loader2 className="animate-spin text-blue-500 w-5 h-5" /></div>
+          ) : searchResults.length > 0 ? (
+            searchResults.map(u => (
+              <div key={u._id} onClick={() => startChat(u._id)} className="p-4 hover:bg-blue-600/10 cursor-pointer flex items-center gap-3 border-b border-white/5 last:border-0">
+                <div className="w-10 h-10 bg-zinc-800 rounded-xl flex items-center justify-center text-blue-500 font-bold border border-white/5">{u.username[0].toUpperCase()}</div>
+                <div className="flex-1 min-w-0 text-left">
+                  <div className="text-sm font-bold text-white">{u.username}</div>
+                  <div className="text-[10px] text-zinc-500 font-medium uppercase tracking-tighter">{u.email}</div>
+                </div>
+                <UserPlus className="w-4 h-4 text-zinc-600 hover:text-blue-500 transition-colors" />
+              </div>
+            ))
+          ) : (
+            <div className="p-8 text-center text-zinc-600 text-[10px] font-black uppercase tracking-widest">No Signals Found</div>
+          )}
+        </div>
+      )}
+
+      {/* Conversations List */}
       <div className="flex-1 overflow-y-auto mt-2 custom-scrollbar">
         {loading ? (
           [1, 2, 3, 4, 5].map(i => (
@@ -167,16 +226,20 @@ export default function Sidebar({ setSelectedChat, selectedChat }) {
               currentUser={currentUser}
               isActive={selectedChat?._id === chat._id}
               isOnline={onlineUsers.includes(chat.participants.find(p => p._id !== currentUser?._id)?._id)}
-              onClick={() => setSelectedChat(chat)}
+              onClick={() => {
+                setSelectedChat(chat);
+                // Clear unread count locally when clicking
+                setConversations(prev => prev.map(c => c._id === chat._id ? {...c, unreadCount: 0} : c));
+              }}
               formatTime={formatTime}
             />
           ))
         ) : (
-          <div className="h-full flex flex-col items-center justify-center px-10 text-center space-y-4">
+          <div className="h-full flex flex-col items-center justify-center px-10 text-center space-y-4 opacity-20">
              <div className="w-12 h-12 bg-zinc-900 rounded-full flex items-center justify-center">
                 <Search className="w-5 h-5 text-zinc-700" />
              </div>
-            <p className="text-[10px] font-black text-zinc-700 uppercase tracking-[0.3em]">Void Detected</p>
+            <p className="text-[10px] font-black text-zinc-700 uppercase tracking-[0.3em]">No Conversations</p>
           </div>
         )}
       </div>
