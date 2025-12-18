@@ -126,3 +126,29 @@ export const saveMessageToBucket = async (chatId, senderId, text) => {
     throw error; // Throwing error so SocketHandler can catch it if needed
   }
 };
+
+export const searchUsers = async (req, res) => {
+  const { query } = req.query; // Get the search term from the URL
+  const loggedInUserId = req.user._id;
+
+  try {
+    // Find users whose username or email matches the search query
+    // $options: "i" makes it case-insensitive
+    const users = await User.find({
+      $and: [
+        {
+          $or: [
+            { username: { $regex: query, $options: "i" } },
+            { email: { $regex: query, $options: "i" } },
+          ],
+        },
+        { _id: { $ne: loggedInUserId } }, // Don't show yourself in search results
+      ],
+    }).select("username email status"); // Only return necessary fields
+
+    res.status(200).json(users);
+  } catch (error) {
+    console.error("Search Users Error:", error);
+    res.status(500).json({ message: "Error searching for users" });
+  }
+};

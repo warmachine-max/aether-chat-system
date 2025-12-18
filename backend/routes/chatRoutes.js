@@ -2,7 +2,8 @@ import express from 'express';
 import { 
   accessConversation, 
   getMessages, 
-  getConversations 
+  getConversations ,
+  searchUsers
 } from '../controllers/chatController.js';
 import { protect } from '../middleware/authMiddleware.js';
 
@@ -16,5 +17,8 @@ router.post('/access', protect, accessConversation);
 
 // Load message history for a specific chat
 router.get('/:chatId', protect, getMessages);
+
+router.get('/users', protect, searchUsers);
+
 
 export default router;

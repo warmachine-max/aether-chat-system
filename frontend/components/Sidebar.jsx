@@ -32,6 +32,7 @@ export default function Sidebar({ setSelectedChat, selectedChat }) {
 
   // 2. GLOBAL SEARCH LOGIC (Username or Email)
   useEffect(() => {
+     const API_URL = import.meta.env.VITE_BACKEND_URL || "http://localhost:5000";
     const searchUsers = async () => {
       if (search.trim().length < 2) {
         setSearchResults([]);
@@ -39,7 +40,9 @@ export default function Sidebar({ setSelectedChat, selectedChat }) {
       }
       setIsSearching(true);
       try {
-        const res = await axios.get(`http://localhost:5000/api/auth/users?search=${search}`, { withCredentials: true });
+      const res = await axios.get(`${API_URL}/api/auth/users?search=${search}`, { 
+        withCredentials: true 
+      });
         // Filter out your own account from results
         setSearchResults(res.data.filter(u => u._id !== currentUser?._id));
       } catch (err) {
