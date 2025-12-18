@@ -4,7 +4,6 @@ import User from "../models/User.js";
 
 /**
  * @desc    Access or Create a 1-on-1 Conversation
- * @route   POST /api/chats/access
  */
 export const accessConversation = async (req, res) => {
   const { recipientId } = req.body;
@@ -13,15 +12,14 @@ export const accessConversation = async (req, res) => {
   if (!recipientId) return res.status(400).json({ message: "Recipient ID required" });
 
   try {
-    // 1. Look for an existing chat between these two users
     let chat = await Conversation.findOne({
       participants: { $all: [senderId, recipientId] }
     }).populate("participants", "username email status");
 
-    // 2. If it doesn't exist, create the metadata
     if (!chat) {
       chat = await Conversation.create({
         participants: [senderId, recipientId],
+        unreadCount: {} // Initialize empty unread map
       });
       chat = await chat.populate("participants", "username email status");
     }
@@ -35,38 +33,51 @@ export const accessConversation = async (req, res) => {
 
 /**
  * @desc    Get all conversations for the Sidebar
- * @route   GET /api/chats
+ * @updated Now calculates unreadCount for the specific logged-in user
  */
 export const getConversations = async (req, res) => {
   try {
+    const userId = req.user._id.toString();
     const chats = await Conversation.find({
       participants: { $in: [req.user._id] }
     })
     .populate("participants", "username email status")
-    .sort({ updatedAt: -1 }); // Newest active chats at the top
+    .sort({ updatedAt: -1 });
 
-    res.status(200).json(chats);
+    // Transform the Map into a single number for the frontend
+    const formattedChats = chats.map(chat => {
+      const chatObj = chat.toObject();
+      // Get the unread count for the logged-in user specifically
+      chatObj.unreadCount = chat.unreadCount ? (chat.unreadCount.get(userId) || 0) : 0;
+      return chatObj;
+    });
+
+    res.status(200).json(formattedChats);
   } catch (error) {
     res.status(500).json({ message: "Could not load sidebar" });
   }
 };
 
 /**
- * @desc    Fetch message history using the Bucket Pattern
- * @route   GET /api/chats/:chatId
+ * @desc    Fetch message history & RESET unread count
+ * @updated Added logic to clear the badge when chat is opened
  */
 export const getMessages = async (req, res) => {
   const { chatId } = req.params;
+  const userId = req.user._id.toString();
 
   try {
-    // Find the latest bucket (page) for this conversation
+    // 1. Reset the unread count for THIS user when they fetch messages
+    await Conversation.findByIdAndUpdate(chatId, {
+      $set: { [`unreadCount.${userId}`]: 0 }
+    });
+
     const latestBucket = await MessageBucket.findOne({ conversationId: chatId })
       .sort({ page: -1 })
       .lean();
 
     if (!latestBucket) return res.status(200).json([]);
 
-    // Return the messages array from the most recent bucket
     res.status(200).json(latestBucket.messages);
   } catch (error) {
     res.status(500).json({ message: "Error fetching history" });
@@ -74,13 +85,11 @@ export const getMessages = async (req, res) => {
 };
 
 /**
- * @desc    Logic to save a message into a bucket (Used by Sockets)
- * @fixed   Replaced invalid $size syntax with index-existence check
+ * @desc    Logic to save a message & INCREMENT recipient unread count
+ * @updated Added unreadCount increment logic
  */
 export const saveMessageToBucket = async (chatId, senderId, text) => {
   try {
-    // 1. Try to find the latest bucket that is NOT full (less than 50 messages)
-    // "messages.49" refers to the 50th item. If it doesn't exist, the bucket is not full.
     let bucket = await MessageBucket.findOneAndUpdate(
       { 
         conversationId: chatId, 
@@ -88,17 +97,12 @@ export const saveMessageToBucket = async (chatId, senderId, text) => {
       },
       { 
         $push: { 
-          messages: { 
-            senderId, 
-            text, 
-            timestamp: new Date() 
-          } 
+          messages: { senderId, text, timestamp: new Date() } 
         } 
       },
       { sort: { page: -1 }, new: true }
     );
 
-    // 2. If no bucket is available (all full or none exist), create a new page
     if (!bucket) {
       const lastBucket = await MessageBucket.findOne({ conversationId: chatId }).sort({ page: -1 });
       const newPageNumber = lastBucket ? lastBucket.page + 1 : 1;
@@ -110,30 +114,36 @@ export const saveMessageToBucket = async (chatId, senderId, text) => {
       });
     }
 
-    // 3. Update the Conversation metadata for the sidebar preview
-    // This allows the sidebar to show the "last message" instantly
-    await Conversation.findByIdAndUpdate(chatId, {
-      lastMessage: { 
-        text, 
-        senderId, 
-        timestamp: new Date() 
+    // --- UNREAD COUNT LOGIC ---
+    const chat = await Conversation.findById(chatId);
+    if (chat) {
+      // Find the recipient (the person who is NOT the sender)
+      const recipientId = chat.participants.find(p => p.toString() !== senderId.toString());
+
+      if (recipientId) {
+        await Conversation.findByIdAndUpdate(chatId, {
+          lastMessage: { text, senderId, timestamp: new Date() },
+          // $inc adds 1 to the recipient's specific unread scorecard
+          $inc: { [`unreadCount.${recipientId.toString()}`]: 1 }
+        });
       }
-    });
+    }
 
     return bucket;
   } catch (error) {
     console.error("Bucket Save Error Details:", error);
-    throw error; // Throwing error so SocketHandler can catch it if needed
+    throw error;
   }
 };
 
+/**
+ * @desc    Search Users logic
+ */
 export const searchUsers = async (req, res) => {
-  const { query } = req.query; // Get the search term from the URL
+  const { query } = req.query;
   const loggedInUserId = req.user._id;
 
   try {
-    // Find users whose username or email matches the search query
-    // $options: "i" makes it case-insensitive
     const users = await User.find({
       $and: [
         {
@@ -142,13 +152,12 @@ export const searchUsers = async (req, res) => {
             { email: { $regex: query, $options: "i" } },
           ],
         },
-        { _id: { $ne: loggedInUserId } }, // Don't show yourself in search results
+        { _id: { $ne: loggedInUserId } },
       ],
-    }).select("username email status"); // Only return necessary fields
+    }).select("username email status");
 
     res.status(200).json(users);
   } catch (error) {
-    console.error("Search Users Error:", error);
     res.status(500).json({ message: "Error searching for users" });
   }
 };

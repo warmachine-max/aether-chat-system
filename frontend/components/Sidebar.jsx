@@ -1,14 +1,14 @@
-import React, { useState, useEffect, useMemo, memo } from 'react';
+import React, { useState, useEffect, useMemo, memo, useCallback } from 'react';
 import axios from 'axios';
 import { Search, UserPlus, Loader2, CheckCheck, MessageSquarePlus } from 'lucide-react';
 import { useSocket } from '../src/context/SocketContext';
 import { useAuth } from '../src/context/AuthContext';
 
-// --- Sub-Component: ChatItem ---
+// --- Sub-Component: ChatItem (Optimized with Memo) ---
 const ChatItem = memo(({ chat, isActive, isOnline, onClick, formatTime, currentUser }) => {
   const otherUser = chat.participants.find(p => p._id !== currentUser?._id);
   
-  // Logic to format unread count (e.g., 10 -> 9+, 100 -> 99+)
+  // Logic: Formatter for unread counts (e.g., 10 -> 9+, 100 -> 99+)
   const formatUnreadCount = (count) => {
     if (!count || count <= 0) return null;
     if (count > 99) return "99+";
@@ -29,9 +29,9 @@ const ChatItem = memo(({ chat, isActive, isOnline, onClick, formatTime, currentU
     >
       <div className="relative flex-shrink-0">
         <div className={`w-12 h-12 rounded-2xl flex items-center justify-center text-lg font-bold border transition-colors ${
-          isActive ? 'bg-blue-600 border-white/20' : 'bg-zinc-800 border-white/5'
+          isActive ? 'bg-blue-600 border-white/20 text-white' : 'bg-zinc-800 border-white/5 text-blue-500'
         }`}>
-          {otherUser?.username?.[0].toUpperCase()}
+          {otherUser?.username?.[0].toUpperCase() || "?"}
         </div>
         {isOnline && (
           <div className="absolute -top-1 -right-1 w-3.5 h-3.5 bg-green-500 rounded-full border-[3px] border-[#070707]" />
@@ -50,7 +50,7 @@ const ChatItem = memo(({ chat, isActive, isOnline, onClick, formatTime, currentU
         
         <div className="flex justify-between items-center">
           <p className={`text-xs truncate max-w-[150px] ${isActive ? 'text-blue-100/80' : 'text-zinc-500'}`}>
-            {chat.lastMessage?.text || "Started a new conversation"}
+            {chat.lastMessage?.text || "New Signal established"}
           </p>
           
           <div className="flex items-center gap-2">
@@ -81,7 +81,7 @@ export default function Sidebar({ setSelectedChat, selectedChat }) {
 
   const API_URL = useMemo(() => import.meta.env.VITE_BACKEND_URL || "http://localhost:5000", []);
 
-  // 1. Initial Fetch
+  // 1. Initial Fetch of Conversations
   useEffect(() => {
     const fetchChats = async () => {
       try {
@@ -96,32 +96,40 @@ export default function Sidebar({ setSelectedChat, selectedChat }) {
     fetchChats();
   }, [API_URL]);
 
-  // 2. Real-time Message/Unread Handling
+  // 2. Real-time Message/Unread Handling (Socket)
   useEffect(() => {
     if (!socket) return;
 
-    socket.on('receive_message', (msg) => {
+    const handleMessage = (msg) => {
       setConversations((prev) => {
-        return prev.map((chat) => {
+        const updatedList = prev.map((chat) => {
           if (chat._id === msg.chatId) {
-            // Increment unread if chat is not currently selected
             const isCurrentlyOpen = selectedChat?._id === chat._id;
+            const isSentByMe = msg.senderId === currentUser?._id;
+
             return {
               ...chat,
               lastMessage: msg,
               updatedAt: new Date().toISOString(),
-              unreadCount: isCurrentlyOpen ? 0 : (chat.unreadCount || 0) + 1
+              // Only increment if chat isn't open and I'm not the one who sent it
+              unreadCount: (isCurrentlyOpen || isSentByMe) 
+                ? 0 
+                : (chat.unreadCount || 0) + 1
             };
           }
           return chat;
-        }).sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
+        });
+        
+        // Move latest chat to the top
+        return [...updatedList].sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
       });
-    });
+    };
 
-    return () => socket.off('receive_message');
-  }, [socket, selectedChat]);
+    socket.on('receive_message', handleMessage);
+    return () => socket.off('receive_message', handleMessage);
+  }, [socket, selectedChat, currentUser?._id]);
 
-  // 3. Search Logic
+  // 3. Search Users Logic (Debounced)
   useEffect(() => {
     const searchUsers = async () => {
       if (search.trim().length < 2) { setSearchResults([]); return; }
@@ -134,17 +142,29 @@ export default function Sidebar({ setSelectedChat, selectedChat }) {
     };
     const debounce = setTimeout(searchUsers, 400);
     return () => clearTimeout(debounce);
-  }, [search, currentUser, API_URL]);
+  }, [search, currentUser?._id, API_URL]);
 
-  const startChat = async (recipientId) => {
+  // Action: Open a chat and reset unread badge locally
+  const handleChatClick = useCallback((chat) => {
+    setSelectedChat(chat);
+    setConversations(prev => prev.map(c => 
+      c._id === chat._id ? { ...c, unreadCount: 0 } : c
+    ));
+  }, [setSelectedChat]);
+
+  const startNewChat = async (recipientId) => {
     try {
       const res = await axios.post(`${API_URL}/api/chats/access`, { recipientId }, { withCredentials: true });
       setSelectedChat(res.data);
       setSearch('');
       setSearchResults([]);
-      // Reset unread for the selected chat
-      setConversations(prev => prev.map(c => c._id === res.data._id ? {...c, unreadCount: 0} : c));
-    } catch (err) { console.error("Signal failed"); }
+      // Refresh list or manually add the new chat to state
+      setConversations(prev => {
+        const exists = prev.find(c => c._id === res.data._id);
+        if (exists) return prev;
+        return [res.data, ...prev];
+      });
+    } catch (err) { console.error("Failed to establish signal"); }
   };
 
   const formatTime = (date) => {
@@ -171,7 +191,7 @@ export default function Sidebar({ setSelectedChat, selectedChat }) {
           </button>
         </div>
         
-        {/* Search Input */}
+        {/* Search Bar */}
         <div className="relative group">
           <Search className={`absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 transition-all duration-300 ${search ? 'text-blue-500 scale-110' : 'text-zinc-600'}`} />
           <input 
@@ -184,14 +204,14 @@ export default function Sidebar({ setSelectedChat, selectedChat }) {
         </div>
       </div>
 
-      {/* Search Overlay */}
+      {/* Search Overlay Results */}
       {search.length > 0 && (
         <div className="absolute top-28 left-4 right-4 bg-zinc-900/95 border border-white/10 rounded-2xl shadow-2xl z-50 max-h-[400px] overflow-y-auto backdrop-blur-xl">
           {isSearching ? (
             <div className="p-8 flex justify-center"><Loader2 className="animate-spin text-blue-500 w-5 h-5" /></div>
           ) : searchResults.length > 0 ? (
             searchResults.map(u => (
-              <div key={u._id} onClick={() => startChat(u._id)} className="p-4 hover:bg-blue-600/10 cursor-pointer flex items-center gap-3 border-b border-white/5 last:border-0">
+              <div key={u._id} onClick={() => startNewChat(u._id)} className="p-4 hover:bg-blue-600/10 cursor-pointer flex items-center gap-3 border-b border-white/5 last:border-0">
                 <div className="w-10 h-10 bg-zinc-800 rounded-xl flex items-center justify-center text-blue-500 font-bold border border-white/5">{u.username[0].toUpperCase()}</div>
                 <div className="flex-1 min-w-0 text-left">
                   <div className="text-sm font-bold text-white">{u.username}</div>
@@ -206,7 +226,7 @@ export default function Sidebar({ setSelectedChat, selectedChat }) {
         </div>
       )}
 
-      {/* Conversations List */}
+      {/* Main Conversations List */}
       <div className="flex-1 overflow-y-auto mt-2 custom-scrollbar">
         {loading ? (
           [1, 2, 3, 4, 5].map(i => (
@@ -226,20 +246,16 @@ export default function Sidebar({ setSelectedChat, selectedChat }) {
               currentUser={currentUser}
               isActive={selectedChat?._id === chat._id}
               isOnline={onlineUsers.includes(chat.participants.find(p => p._id !== currentUser?._id)?._id)}
-              onClick={() => {
-                setSelectedChat(chat);
-                // Clear unread count locally when clicking
-                setConversations(prev => prev.map(c => c._id === chat._id ? {...c, unreadCount: 0} : c));
-              }}
+              onClick={() => handleChatClick(chat)}
               formatTime={formatTime}
             />
           ))
         ) : (
-          <div className="h-full flex flex-col items-center justify-center px-10 text-center space-y-4 opacity-20">
+          <div className="h-full flex flex-col items-center justify-center px-10 text-center space-y-4 opacity-30">
              <div className="w-12 h-12 bg-zinc-900 rounded-full flex items-center justify-center">
                 <Search className="w-5 h-5 text-zinc-700" />
              </div>
-            <p className="text-[10px] font-black text-zinc-700 uppercase tracking-[0.3em]">No Conversations</p>
+            <p className="text-[10px] font-black text-zinc-700 uppercase tracking-[0.3em]">Void Detected</p>
           </div>
         )}
       </div>
