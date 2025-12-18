@@ -11,7 +11,7 @@ import authRoutes from './routes/authRoutes.js';
 import chatRoutes from "./routes/chatRoutes.js";
 
 // Socket Handler Import
-import  {setupSocketEvents}  from './sockets/socketHandler.js';
+import { setupSocketEvents } from './sockets/socketHandler.js';
 
 // Configuration
 dotenv.config();
@@ -23,11 +23,13 @@ const httpServer = createServer(app);
 /**
  * 1. Unified CORS Configuration
  * Essential for the Vercel-to-Render "withCredentials" flow.
+ * Uses FRONTEND_URL from environment variables for production.
  */
 const corsOptions = {
-    origin: "http://localhost:5173", // Replace with your Vercel URL in production
+    origin: process.env.FRONTEND_URL || "http://localhost:5173", 
     credentials: true,
-    methods: ["GET", "POST", "PUT", "DELETE"]
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"]
 };
 
 // Middleware
@@ -41,12 +43,12 @@ app.use(cookieParser());
  */
 const io = new Server(httpServer, { 
     cors: corsOptions,
-    pingTimeout: 60000, // Closes connection after 60s of inactivity to save resources
+    pingTimeout: 60000, 
+    connectTimeout: 30000,
 });
 
 /**
  * 3. Socket Event Handling
- * Modularized logic to keep server.js clean.
  */
 setupSocketEvents(io);
 
@@ -56,7 +58,7 @@ setupSocketEvents(io);
 app.use('/api/auth', authRoutes);
 app.use('/api/chats', chatRoutes);
 
-// Health Check
+// Health Check (Very important for Render monitoring)
 app.get('/', (req, res) => {
     res.send('🚀 Aether Backend Operational and Secure');
 });
@@ -70,7 +72,7 @@ httpServer.listen(PORT, () => {
     ---------------------------------------------
     🚀 Server: http://localhost:${PORT}
     📡 Sockets: Operational
-    🗄️  Database: Connected
+    🌍 Allowed Origin: ${process.env.FRONTEND_URL || "http://localhost:5173"}
     ---------------------------------------------
     `);
 });
