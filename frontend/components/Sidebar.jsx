@@ -16,9 +16,12 @@ export default function Sidebar({ setSelectedChat, selectedChat }) {
 
   // 1. FETCH CONVERSATIONS (Your existing chats)
   useEffect(() => {
+     const API_URL = import.meta.env.VITE_BACKEND_URL || "http://localhost:5000";
     const fetchChats = async () => {
       try {
-        const res = await axios.get('http://localhost:5000/api/chats', { withCredentials: true });
+              const res = await axios.get(`${API_URL}/api/chats`, { 
+          withCredentials: true 
+        });
         setConversations(res.data);
       } catch (err) {
         console.error("Error loading chats:", err);

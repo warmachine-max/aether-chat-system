@@ -13,15 +13,16 @@ export default function Signup() {
   const [loading, setLoading] = useState(false);
 
   const handleSubmit = async (e) => {
+     const API_URL = import.meta.env.VITE_BACKEND_URL || "http://localhost:5000";
     e.preventDefault();
     setError('');
     setLoading(true);
 
     try {
       // Ensure this matches your Render backend URL
-      const res = await axios.post('http://localhost:5000/api/auth/signup', formData, {
-        withCredentials: true // Mandatory for the HttpOnly cookie we set in AuthController
-      });
+      const res = await axios.post(`${API_URL}/api/auth/signup`, formData, {
+  withCredentials: true 
+});
 
       // Match the data structure returned by your AuthController
       const userData = {

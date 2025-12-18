@@ -8,12 +8,13 @@ export default function Home() {
   const navigate = useNavigate();
 
   const handleLogout = async () => {
+      const API_URL = import.meta.env.VITE_BACKEND_URL || "http://localhost:5000";
     try {
       // CRITICAL: withCredentials ensures the cookie is sent to be cleared
-      await axios.post('http://localhost:5000/api/auth/logout', 
-        { userId: user?._id }, 
-        { withCredentials: true }
-      );
+     await axios.post(`${API_URL}/api/auth/logout`, 
+  { userId: user?._id }, 
+  { withCredentials: true }
+);
     } catch (err) {
       console.error("Backend logout failed", err);
     } finally {

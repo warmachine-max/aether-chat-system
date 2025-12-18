@@ -12,12 +12,14 @@ export const SocketProvider = ({ children }) => {
   const [onlineUsers, setOnlineUsers] = useState([]);
 
   useEffect(() => {
+    const API_URL = import.meta.env.VITE_BACKEND_URL || "http://localhost:5000";
     if (user) {
       // Initialize connection
-      const newSocket = io('http://localhost:5000', {
-        withCredentials: true,
-        query: { userId: user._id }
-      });
+      const newSocket = io(API_URL, {
+  withCredentials: true,
+  query: { userId: user._id },
+  transports: ['websocket', 'polling'] // Recommended for better compatibility with Render
+});
 
       setSocket(newSocket);
 

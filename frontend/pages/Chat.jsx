@@ -10,9 +10,10 @@ export default function Chat() {
 
   // Fetch sidebar data on mount
   useEffect(() => {
+    const API_URL = import.meta.env.VITE_BACKEND_URL || "http://localhost:5000";
     const fetchConversations = async () => {
       try {
-        const res = await axios.get('http://localhost:5000/api/chats', { withCredentials: true });
+      const res = await axios.get(`${API_URL}/api/chats`, { withCredentials: true });
         setConversations(res.data);
       } catch (err) {
         console.error("Failed to load chats");

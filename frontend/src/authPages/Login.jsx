@@ -12,14 +12,15 @@ export default function Login() {
   const [error, setError] = useState(''); // Added error state for UI
 
   const handleSubmit = async (e) => {
+    const API_URL = import.meta.env.VITE_BACKEND_URL || "http://localhost:5000";
     e.preventDefault();
     setLoading(true);
     setError('');
 
     try {
-      const res = await axios.post('http://localhost:5000/api/auth/login', formData, {
-        withCredentials: true // CRITICAL: Allows the browser to store the HttpOnly cookie
-      });
+    const res = await axios.post(`${API_URL}/api/auth/login`, formData, {
+  withCredentials: true 
+});
 
       // Passing the full standardized user object to your AuthContext
       login({ 

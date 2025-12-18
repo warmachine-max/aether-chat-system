@@ -13,9 +13,11 @@ export default function ChatWindow({ chat }) {
 
   // Load history from Bucket
   useEffect(() => {
+    const API_URL = import.meta.env.VITE_BACKEND_URL || "http://localhost:5000";
     const fetchMessages = async () => {
       try {
-        const res = await axios.get(`http://localhost:5000/api/chats/${chat._id}`, { withCredentials: true });
+        const res = await axios.get(`${API_URL}/api/chats/${chat._id}`,
+          { withCredentials: true });
         setMessages(res.data);
       } catch (err) { console.error(err); }
     };
