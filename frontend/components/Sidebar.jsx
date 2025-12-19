@@ -95,42 +95,45 @@ export default function Sidebar({ setSelectedChat, selectedChat }) {
     fetchChats();
   }, [API_URL]);
 
-  // 2. Real-time Message/Unread/Reordering Handling
+  // 2. Real-time Reordering & Unread Handling
   useEffect(() => {
     if (!socket) return;
 
     const handleMessage = (msg) => {
       setConversations((prev) => {
-        // Find the specific chat that received a message
-        const chatToUpdate = prev.find((c) => c._id === msg.chatId);
+        // Find existing chat
+        const chatIndex = prev.findIndex((c) => c._id === msg.chatId);
 
-        if (chatToUpdate) {
+        if (chatIndex !== -1) {
+          const chatToUpdate = { ...prev[chatIndex] };
+          
           const isCurrentlyOpen = selectedChat?._id === chatToUpdate._id;
           const isSentByMe = msg.senderId === currentUser?._id;
 
-          const updatedChat = {
-            ...chatToUpdate,
-            lastMessage: msg,
-            updatedAt: new Date().toISOString(),
-            unreadCount: (isCurrentlyOpen || isSentByMe) 
-              ? 0 
-              : (chatToUpdate.unreadCount || 0) + 1
-          };
+          // Update object
+          chatToUpdate.lastMessage = msg;
+          chatToUpdate.updatedAt = new Date().toISOString();
+          chatToUpdate.unreadCount = (isCurrentlyOpen || isSentByMe) 
+            ? 0 
+            : (chatToUpdate.unreadCount || 0) + 1;
 
-          // MOVE TO TOP: Filter out the old version, and put the updated one at index 0
-          const otherChats = prev.filter((c) => c._id !== msg.chatId);
-          return [updatedChat, ...otherChats];
+          // Remove old version and move to top
+          const remainingChats = prev.filter((_, idx) => idx !== chatIndex);
+          return [chatToUpdate, ...remainingChats];
+        } else {
+          // If message is from a NEW conversation not yet in sidebar, 
+          // a simple refresh or a specific 'new_chat' event might be needed.
+          return prev;
         }
-
-        return prev;
       });
     };
 
     socket.on('receive_message', handleMessage);
     return () => socket.off('receive_message', handleMessage);
-  }, [socket, selectedChat, currentUser?._id]);
+    // Added selectedChat?._id to dependencies to ensure listener knows which chat is open
+  }, [socket, selectedChat?._id, currentUser?._id]);
 
-  // 3. Search Logic
+  // 3. Search Users Logic
   useEffect(() => {
     const searchUsers = async () => {
       if (search.trim().length < 2) { setSearchResults([]); return; }
@@ -161,9 +164,8 @@ export default function Sidebar({ setSelectedChat, selectedChat }) {
       setConversations(prev => {
         const exists = prev.find(c => c._id === res.data._id);
         if (exists) {
-            // Move existing chat to top if found via search
-            const otherChats = prev.filter(c => c._id !== res.data._id);
-            return [res.data, ...otherChats];
+            const others = prev.filter(c => c._id !== res.data._id);
+            return [res.data, ...others];
         }
         return [res.data, ...prev];
       });
