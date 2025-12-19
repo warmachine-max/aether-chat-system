@@ -8,7 +8,6 @@ import { useAuth } from '../src/context/AuthContext';
 const ChatItem = memo(({ chat, isActive, isOnline, onClick, formatTime, currentUser }) => {
   const otherUser = chat.participants.find(p => p._id !== currentUser?._id);
   
-  // Logic: Formatter for unread counts (e.g., 10 -> 9+, 100 -> 99+)
   const formatUnreadCount = (count) => {
     if (!count || count <= 0) return null;
     if (count > 99) return "99+";
@@ -81,7 +80,7 @@ export default function Sidebar({ setSelectedChat, selectedChat }) {
 
   const API_URL = useMemo(() => import.meta.env.VITE_BACKEND_URL || "http://localhost:5000", []);
 
-  // 1. Initial Fetch of Conversations
+  // 1. Initial Fetch
   useEffect(() => {
     const fetchChats = async () => {
       try {
@@ -96,32 +95,34 @@ export default function Sidebar({ setSelectedChat, selectedChat }) {
     fetchChats();
   }, [API_URL]);
 
-  // 2. Real-time Message/Unread Handling (Socket)
+  // 2. Real-time Message/Unread/Reordering Handling
   useEffect(() => {
     if (!socket) return;
 
     const handleMessage = (msg) => {
       setConversations((prev) => {
-        const updatedList = prev.map((chat) => {
-          if (chat._id === msg.chatId) {
-            const isCurrentlyOpen = selectedChat?._id === chat._id;
-            const isSentByMe = msg.senderId === currentUser?._id;
+        // Find the specific chat that received a message
+        const chatToUpdate = prev.find((c) => c._id === msg.chatId);
 
-            return {
-              ...chat,
-              lastMessage: msg,
-              updatedAt: new Date().toISOString(),
-              // Only increment if chat isn't open and I'm not the one who sent it
-              unreadCount: (isCurrentlyOpen || isSentByMe) 
-                ? 0 
-                : (chat.unreadCount || 0) + 1
-            };
-          }
-          return chat;
-        });
-        
-        // Move latest chat to the top
-        return [...updatedList].sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
+        if (chatToUpdate) {
+          const isCurrentlyOpen = selectedChat?._id === chatToUpdate._id;
+          const isSentByMe = msg.senderId === currentUser?._id;
+
+          const updatedChat = {
+            ...chatToUpdate,
+            lastMessage: msg,
+            updatedAt: new Date().toISOString(),
+            unreadCount: (isCurrentlyOpen || isSentByMe) 
+              ? 0 
+              : (chatToUpdate.unreadCount || 0) + 1
+          };
+
+          // MOVE TO TOP: Filter out the old version, and put the updated one at index 0
+          const otherChats = prev.filter((c) => c._id !== msg.chatId);
+          return [updatedChat, ...otherChats];
+        }
+
+        return prev;
       });
     };
 
@@ -129,7 +130,7 @@ export default function Sidebar({ setSelectedChat, selectedChat }) {
     return () => socket.off('receive_message', handleMessage);
   }, [socket, selectedChat, currentUser?._id]);
 
-  // 3. Search Users Logic (Debounced)
+  // 3. Search Logic
   useEffect(() => {
     const searchUsers = async () => {
       if (search.trim().length < 2) { setSearchResults([]); return; }
@@ -144,7 +145,6 @@ export default function Sidebar({ setSelectedChat, selectedChat }) {
     return () => clearTimeout(debounce);
   }, [search, currentUser?._id, API_URL]);
 
-  // Action: Open a chat and reset unread badge locally
   const handleChatClick = useCallback((chat) => {
     setSelectedChat(chat);
     setConversations(prev => prev.map(c => 
@@ -158,10 +158,13 @@ export default function Sidebar({ setSelectedChat, selectedChat }) {
       setSelectedChat(res.data);
       setSearch('');
       setSearchResults([]);
-      // Refresh list or manually add the new chat to state
       setConversations(prev => {
         const exists = prev.find(c => c._id === res.data._id);
-        if (exists) return prev;
+        if (exists) {
+            // Move existing chat to top if found via search
+            const otherChats = prev.filter(c => c._id !== res.data._id);
+            return [res.data, ...otherChats];
+        }
         return [res.data, ...prev];
       });
     } catch (err) { console.error("Failed to establish signal"); }
@@ -179,7 +182,6 @@ export default function Sidebar({ setSelectedChat, selectedChat }) {
 
   return (
     <div className="flex flex-col h-full bg-[#070707] border-r border-white/5 w-[360px] relative">
-      {/* Header */}
       <div className="p-6 pb-4">
         <div className="flex justify-between items-center mb-6">
           <div className="flex items-center gap-2">
@@ -191,7 +193,6 @@ export default function Sidebar({ setSelectedChat, selectedChat }) {
           </button>
         </div>
         
-        {/* Search Bar */}
         <div className="relative group">
           <Search className={`absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 transition-all duration-300 ${search ? 'text-blue-500 scale-110' : 'text-zinc-600'}`} />
           <input 
@@ -204,7 +205,6 @@ export default function Sidebar({ setSelectedChat, selectedChat }) {
         </div>
       </div>
 
-      {/* Search Overlay Results */}
       {search.length > 0 && (
         <div className="absolute top-28 left-4 right-4 bg-zinc-900/95 border border-white/10 rounded-2xl shadow-2xl z-50 max-h-[400px] overflow-y-auto backdrop-blur-xl">
           {isSearching ? (
@@ -226,7 +226,6 @@ export default function Sidebar({ setSelectedChat, selectedChat }) {
         </div>
       )}
 
-      {/* Main Conversations List */}
       <div className="flex-1 overflow-y-auto mt-2 custom-scrollbar">
         {loading ? (
           [1, 2, 3, 4, 5].map(i => (

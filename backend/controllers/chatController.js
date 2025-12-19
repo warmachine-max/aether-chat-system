@@ -12,14 +12,18 @@ export const accessConversation = async (req, res) => {
   if (!recipientId) return res.status(400).json({ message: "Recipient ID required" });
 
   try {
+    // We sort by updatedAt here just in case multiple sessions exist
     let chat = await Conversation.findOne({
       participants: { $all: [senderId, recipientId] }
-    }).populate("participants", "username email status");
+    })
+    .populate("participants", "username email status")
+    .sort({ updatedAt: -1 });
 
     if (!chat) {
       chat = await Conversation.create({
         participants: [senderId, recipientId],
-        unreadCount: {} // Initialize empty unread map
+        unreadCount: {}, 
+        updatedAt: new Date() // Initialize timestamp
       });
       chat = await chat.populate("participants", "username email status");
     }
@@ -33,7 +37,6 @@ export const accessConversation = async (req, res) => {
 
 /**
  * @desc    Get all conversations for the Sidebar
- * @updated Now calculates unreadCount for the specific logged-in user
  */
 export const getConversations = async (req, res) => {
   try {
@@ -42,12 +45,10 @@ export const getConversations = async (req, res) => {
       participants: { $in: [req.user._id] }
     })
     .populate("participants", "username email status")
-    .sort({ updatedAt: -1 });
+    .sort({ updatedAt: -1 }); // CRITICAL: This ensures newest chats stay at the top
 
-    // Transform the Map into a single number for the frontend
     const formattedChats = chats.map(chat => {
       const chatObj = chat.toObject();
-      // Get the unread count for the logged-in user specifically
       chatObj.unreadCount = chat.unreadCount ? (chat.unreadCount.get(userId) || 0) : 0;
       return chatObj;
     });
@@ -60,14 +61,13 @@ export const getConversations = async (req, res) => {
 
 /**
  * @desc    Fetch message history & RESET unread count
- * @updated Added logic to clear the badge when chat is opened
  */
 export const getMessages = async (req, res) => {
   const { chatId } = req.params;
   const userId = req.user._id.toString();
 
   try {
-    // 1. Reset the unread count for THIS user when they fetch messages
+    // Atomic reset of unread count
     await Conversation.findByIdAndUpdate(chatId, {
       $set: { [`unreadCount.${userId}`]: 0 }
     });
@@ -86,14 +86,14 @@ export const getMessages = async (req, res) => {
 
 /**
  * @desc    Logic to save a message & INCREMENT recipient unread count
- * @updated Added unreadCount increment logic
  */
 export const saveMessageToBucket = async (chatId, senderId, text) => {
   try {
+    // 1. Efficiently find or update the bucket using the "Bucket Pattern"
     let bucket = await MessageBucket.findOneAndUpdate(
       { 
         conversationId: chatId, 
-        "messages.49": { $exists: false } 
+        "messages.49": { $exists: false } // Checks if bucket is NOT full
       },
       { 
         $push: { 
@@ -103,6 +103,7 @@ export const saveMessageToBucket = async (chatId, senderId, text) => {
       { sort: { page: -1 }, new: true }
     );
 
+    // 2. If no available space, create a new bucket page
     if (!bucket) {
       const lastBucket = await MessageBucket.findOne({ conversationId: chatId }).sort({ page: -1 });
       const newPageNumber = lastBucket ? lastBucket.page + 1 : 1;
@@ -114,16 +115,16 @@ export const saveMessageToBucket = async (chatId, senderId, text) => {
       });
     }
 
-    // --- UNREAD COUNT LOGIC ---
+    // 3. UPDATE CONVERSATION METADATA (Reordering & Unread logic)
     const chat = await Conversation.findById(chatId);
     if (chat) {
-      // Find the recipient (the person who is NOT the sender)
       const recipientId = chat.participants.find(p => p.toString() !== senderId.toString());
 
       if (recipientId) {
         await Conversation.findByIdAndUpdate(chatId, {
           lastMessage: { text, senderId, timestamp: new Date() },
-          // $inc adds 1 to the recipient's specific unread scorecard
+          // FIX: Manually updating updatedAt triggers the sort order for the sidebar
+          updatedAt: new Date(), 
           $inc: { [`unreadCount.${recipientId.toString()}`]: 1 }
         });
       }
