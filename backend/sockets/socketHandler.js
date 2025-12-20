@@ -1,4 +1,4 @@
-import  MessageBucket  from '../models/MessageBucket.js'; // Adjust path to your model
+import { saveMessageToBucket } from '../controllers/chatController.js'; 
 import User from '../models/User.js';
 
 export const setupSocketEvents = (io) => {
@@ -20,77 +20,58 @@ export const setupSocketEvents = (io) => {
 
         // 2. Chat Rooms
         socket.on('join_chat', (chatId) => {
-            socket.join(chatId.toString()); // Ensure string for room names
-            console.log(`🔒 Room Joined: ${chatId}`);
+            socket.join(chatId.toString());
         });
 
         socket.on('leave_chat', (chatId) => {
             socket.leave(chatId.toString());
         });
 
-        // 3. Messages (Optimized for Sync Deletion)
+        // 3. Messages (Now using the Controller Logic)
         socket.on('send_message', async (data) => {
             const { chatId, senderId, recipientId, text, _id: tempId } = data;
 
             try {
-                // A. Save to Database First
-                // This logic mirrors your saveMessageToBucket controller
-                const buckets = await MessageBucket.find({ conversationId: chatId });
-                
-                let savedMsg = null;
+                // This function handles finding OR creating buckets for BOTH users
+                const savedMsg = await saveMessageToBucket(chatId, senderId, text);
 
-                // We save the message to ALL participant buckets
-                const savePromises = buckets.map(async (bucket) => {
-                    bucket.messages.push({ senderId, text, timestamp: new Date() });
-                    const updatedBucket = await bucket.save();
-                    // Capture the last message added (the one with the new MongoDB _id)
-                    savedMsg = updatedBucket.messages[updatedBucket.messages.length - 1];
-                });
-
-                await Promise.all(savePromises);
-
-                // B. Prepare Payload with REAL ID
                 const messagePayload = {
                     ...data,
-                    _id: savedMsg._id, // The real MongoDB ID
+                    _id: savedMsg._id, // Real MongoDB ID
                     timestamp: savedMsg.timestamp
                 };
 
-                // C. Broadcast to the recipient room
+                // Broadcast to others in the room
                 socket.to(chatId.toString()).emit('receive_message', messagePayload);
 
-                // D. IMPORTANT: Ack back to sender to replace their Temp ID with Real ID
+                // Send REAL ID back to sender to fix their Trash Can/Delete button
                 socket.emit('message_ack', { 
                     tempId: tempId, 
                     realId: savedMsg._id 
                 });
 
-                // E. Sidebar update for recipient (if not in room)
+                // Update Sidebar for recipient
                 const recipientSocketId = onlineUsers.get(recipientId);
                 if (recipientSocketId) {
                     io.to(recipientSocketId).emit('sidebar_update', messagePayload);
                 }
 
             } catch (err) {
-                console.error("❌ Persistence/Socket Error:", err);
-                socket.emit('error', { message: "Failed to send message" });
+                console.error("❌ Socket Error:", err);
+                socket.emit('error', { message: "Failed to save message" });
             }
         });
 
-        // 4. Typing Status
+        // 4. Typing
         socket.on('typing', ({ chatId, typing }) => {
             socket.to(chatId.toString()).emit('typing_status', { chatId, typing });
         });
 
-        // 5. Message Deletion (Fixed Sync)
+        // 5. Deletion Sync
         socket.on('delete_message', ({ chatId, messageId }) => {
-            // This broadcasts the delete command to the other user's ChatWindow.jsx
-            // Because of the 'message_ack' above, both users now have the same messageId
-            socket.to(chatId.toString()).emit('message_deleted', { messageId });
-            console.log(`🗑️ Message Deleted in Room ${chatId}: ${messageId}`);
+            socket.broadcast.to(chatId.toString()).emit('message_deleted', { messageId });
         });
 
-        // 6. Disconnect
         socket.on('disconnect', async () => {
             if (socket.userId) {
                 onlineUsers.delete(socket.userId);
@@ -98,11 +79,9 @@ export const setupSocketEvents = (io) => {
                     "status.isOnline": false, 
                     "status.lastSeen": new Date() 
                 });
-
                 io.emit('online_users_list', Array.from(onlineUsers.keys()));
                 io.emit('user_status_change', { userId: socket.userId, isOnline: false });
             }
-            console.log('👋 Signal Terminated');
         });
     });
 };

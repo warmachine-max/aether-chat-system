@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import axios from 'axios';
-import { Send, Phone, Video, MoreVertical, Trash2, Eraser } from 'lucide-react';
+import { Send, MoreVertical, Trash2, Eraser, Loader2, ShieldCheck } from 'lucide-react';
 import { useSocket } from '../src/context/SocketContext';
 import { useAuth } from '../src/context/AuthContext';
 
@@ -12,6 +12,8 @@ export default function ChatWindow({ chat }) {
   const [isTyping, setIsTyping] = useState(false);
   const [otherUserTyping, setOtherUserTyping] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(null); // Track which message is deleting
+  
   const scrollRef = useRef();
   const menuRef = useRef();
 
@@ -45,17 +47,14 @@ export default function ChatWindow({ chat }) {
     return () => socket?.emit('leave_chat', chat._id);
   }, [chat._id, socket, API_URL]);
 
-  // 2. Real-time Listeners (Sync IDs, Deletes, and Messages)
+  // 2. Real-time Listeners
   useEffect(() => {
     if (!socket) return;
 
     const handleMessage = (msg) => {
       if (msg.chatId === chat._id) {
         setMessages((prev) => {
-          const isDuplicate = prev.some(m => 
-            (msg._id && m._id === msg._id) || 
-            (m.senderId === msg.senderId && m.text === msg.text && m.timestamp === msg.timestamp)
-          );
+          const isDuplicate = prev.some(m => m._id === msg._id);
           if (isDuplicate) return prev;
           return [...prev, msg];
         });
@@ -71,7 +70,6 @@ export default function ChatWindow({ chat }) {
       if (chatId === chat._id) setOtherUserTyping(typing);
     };
 
-    // THIS IS THE NEW LINK: Syncs temp ID with MongoDB ID
     const handleAck = ({ tempId, realId }) => {
       setMessages((prev) => 
         prev.map(m => m._id === tempId ? { ...m, _id: realId } : m)
@@ -91,7 +89,7 @@ export default function ChatWindow({ chat }) {
     };
   }, [socket, chat._id]);
 
-  // Auto-scroll to bottom
+  // Auto-scroll
   useEffect(() => {
     scrollRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, otherUserTyping]);
@@ -114,25 +112,43 @@ export default function ChatWindow({ chat }) {
       _id: tempId 
     };
 
-    socket.emit('send_message', msgData);
+    // Optimistic Update
     setMessages((prev) => [...prev, msgData]); 
+    socket.emit('send_message', msgData);
+    
     setNewMessage('');
     setIsTyping(false);
     socket.emit('typing', { chatId: chat._id, typing: false });
   };
 
   const deleteMsg = async (messageId) => {
-    if (messageId.toString().startsWith('temp-')) {
-        setMessages(prev => prev.filter(m => m._id !== messageId));
-        return;
-    }
+    if (messageId.toString().startsWith('temp-')) return;
+    
+    setIsDeleting(messageId);
     try {
       const res = await axios.delete(`${API_URL}/api/chats/${chat._id}/message/${messageId}`, { withCredentials: true });
+      
+      // Remove locally
       setMessages(prev => prev.filter(m => m._id !== messageId));
+      
+      // If it was an "Unsend", tell the other person via socket
       if (res.data.action === "unsend") {
         socket.emit('delete_message', { chatId: chat._id, messageId });
       }
-    } catch (err) { console.error("Delete failed"); }
+    } catch (err) { 
+        console.error("Delete failed"); 
+    } finally {
+        setIsDeleting(null);
+    }
+  };
+
+  const handleClearHistory = async () => {
+    if (!window.confirm("Wipe your local history? (Other user keeps their copy)")) return;
+    try {
+      await axios.delete(`${API_URL}/api/chats/${chat._id}/clear`, { withCredentials: true });
+      setMessages([]);
+      setShowMenu(false);
+    } catch (err) { console.error("Clear failed"); }
   };
 
   const getMessageDateLabel = (dateString) => {
@@ -146,9 +162,7 @@ export default function ChatWindow({ chat }) {
     <div className="flex flex-col h-full bg-[#050505] text-zinc-100 relative">
       <style>{`
         .custom-scrollbar::-webkit-scrollbar { width: 4px; }
-        .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
         .custom-scrollbar::-webkit-scrollbar-thumb { background: #27272a; border-radius: 10px; }
-        .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #3f3f46; }
       `}</style>
 
       {/* Header */}
@@ -162,14 +176,20 @@ export default function ChatWindow({ chat }) {
           </div>
           <div>
             <h2 className="font-bold text-sm tracking-tight">{otherUser?.username || "Secure Line"}</h2>
-            <p className="text-[10px] text-zinc-500 uppercase tracking-widest font-black">{isOtherUserOnline ? 'Online' : 'Encrypted'}</p>
+            <div className="flex items-center gap-1.5">
+                <ShieldCheck className="w-3 h-3 text-blue-500/50" />
+                <p className="text-[9px] text-zinc-500 uppercase tracking-widest font-black">
+                    {isOtherUserOnline ? 'Active Connection' : 'End-to-End Encrypted'}
+                </p>
+            </div>
           </div>
         </div>
-        <div className="flex items-center gap-5 text-zinc-500 relative" ref={menuRef}>
-            <MoreVertical className="w-4 h-4 cursor-pointer hover:text-white transition-colors" onClick={() => setShowMenu(!showMenu)} />
+        
+        <div className="relative" ref={menuRef}>
+            <MoreVertical className="w-4 h-4 text-zinc-500 cursor-pointer hover:text-white transition-colors" onClick={() => setShowMenu(!showMenu)} />
             {showMenu && (
-                <div className="absolute right-0 top-10 w-48 bg-zinc-900 border border-white/10 rounded-xl py-2 z-50 shadow-2xl animate-in fade-in zoom-in duration-150">
-                    <button onClick={() => {}} className="w-full px-4 py-2 text-left text-xs font-bold flex items-center gap-3 hover:bg-white/5 text-red-400">
+                <div className="absolute right-0 top-10 w-48 bg-zinc-900 border border-white/10 rounded-xl py-2 z-[100] shadow-2xl overflow-hidden">
+                    <button onClick={handleClearHistory} className="w-full px-4 py-3 text-left text-[11px] font-bold flex items-center gap-3 hover:bg-white/5 text-red-400 uppercase tracking-tighter">
                         <Eraser className="w-3.5 h-3.5" /> Clear History
                     </button>
                 </div>
@@ -178,11 +198,10 @@ export default function ChatWindow({ chat }) {
       </div>
 
       {/* Message Feed */}
-      <div className="flex-1 overflow-y-auto px-6 py-4 custom-scrollbar">
+      <div className="flex-1 overflow-y-auto px-6 py-4 custom-scrollbar space-y-1">
         {messages.map((m, i) => {
           const isMe = m.senderId === user._id;
           const showTime = i === messages.length - 1 || messages[i+1]?.senderId !== m.senderId;
-          const time = new Date(m.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
           const showDateDivider = i === 0 || getMessageDateLabel(m.timestamp) !== getMessageDateLabel(messages[i-1].timestamp);
 
           return (
@@ -195,16 +214,16 @@ export default function ChatWindow({ chat }) {
                 </div>
               )}
               
-              <div className={`group flex flex-col ${isMe ? 'items-end' : 'items-start'} ${showTime ? 'mb-4' : 'mb-1'} w-full`}>
-                <div className={`flex items-center gap-2 max-w-[85%] relative ${isMe ? 'flex-row' : 'flex-row-reverse'}`}>
+              <div className={`group flex flex-col ${isMe ? 'items-end' : 'items-start'} ${showTime ? 'mb-4' : 'mb-0.5'}`}>
+                <div className={`flex items-center gap-2 max-w-[85%] ${isMe ? 'flex-row' : 'flex-row-reverse'}`}>
                   
-                  {/* Delete button available for both now */}
-                  {m._id && (
+                  {isMe && m._id && !m._id.startsWith('temp-') && (
                     <button 
                       onClick={() => deleteMsg(m._id)}
-                      className="opacity-0 group-hover:opacity-100 p-2 hover:bg-white/5 rounded-full transition-all text-zinc-600 hover:text-red-500"
+                      disabled={isDeleting === m._id}
+                      className="opacity-0 group-hover:opacity-100 p-2 hover:bg-white/5 rounded-full transition-all text-zinc-600 hover:text-red-500 disabled:opacity-50"
                     >
-                      <Trash2 className="w-3.5 h-3.5" />
+                      {isDeleting === m._id ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
                     </button>
                   )}
 
@@ -217,7 +236,7 @@ export default function ChatWindow({ chat }) {
                 </div>
                 {showTime && (
                   <span className="text-[9px] text-zinc-600 mt-1 px-1 font-bold">
-                    {time}
+                    {new Date(m.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                   </span>
                 )}
               </div>
@@ -225,10 +244,10 @@ export default function ChatWindow({ chat }) {
           );
         })}
         {otherUserTyping && (
-          <div className="flex gap-1.5 p-3 bg-zinc-900/50 rounded-xl w-fit animate-pulse">
-            <div className="w-1.5 h-1.5 bg-zinc-500 rounded-full" />
-            <div className="w-1.5 h-1.5 bg-zinc-500 rounded-full" />
-            <div className="w-1.5 h-1.5 bg-zinc-500 rounded-full" />
+          <div className="flex gap-1 p-3 bg-zinc-900/30 rounded-xl w-fit animate-pulse ml-1">
+            <div className="w-1.5 h-1.5 bg-blue-500/50 rounded-full" />
+            <div className="w-1.5 h-1.5 bg-blue-500/50 rounded-full" />
+            <div className="w-1.5 h-1.5 bg-blue-500/50 rounded-full" />
           </div>
         )}
         <div ref={scrollRef} />
@@ -239,8 +258,8 @@ export default function ChatWindow({ chat }) {
         <div className="relative flex items-center gap-3 max-w-5xl mx-auto w-full">
           <input 
             type="text"
-            className="w-full bg-zinc-900/80 border border-white/10 rounded-2xl py-4 pl-6 pr-14 focus:outline-none focus:ring-2 focus:ring-blue-500/20 text-sm text-white placeholder:text-zinc-600"
-            placeholder="Type a message..."
+            className="w-full bg-zinc-900/80 border border-white/10 rounded-2xl py-4 pl-6 pr-14 focus:outline-none focus:ring-2 focus:ring-blue-500/20 text-sm text-white placeholder:text-zinc-700"
+            placeholder="Transmit signal..."
             value={newMessage}
             onChange={(e) => {
               setNewMessage(e.target.value);
@@ -249,9 +268,12 @@ export default function ChatWindow({ chat }) {
                 socket?.emit('typing', { chatId: chat._id, typing: true });
               }
             }}
-            onBlur={() => socket?.emit('typing', { chatId: chat._id, typing: false })}
+            onBlur={() => {
+                setIsTyping(false);
+                socket?.emit('typing', { chatId: chat._id, typing: false });
+            }}
           />
-          <button type="submit" disabled={!newMessage.trim()} className="absolute right-2 p-3 bg-blue-600 rounded-xl hover:bg-blue-500 transition-all active:scale-95">
+          <button type="submit" disabled={!newMessage.trim()} className="absolute right-2 p-3 bg-blue-600 rounded-xl hover:bg-blue-500 transition-all active:scale-95 disabled:opacity-50 disabled:bg-zinc-800">
             <Send className="w-4 h-4 text-white" />
           </button>
         </div>

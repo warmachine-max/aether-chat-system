@@ -7,7 +7,7 @@ import User from "../models/User.js";
  */
 export const accessConversation = async (req, res) => {
   const { recipientId } = req.body;
-  const senderId = req.user._id;
+  const senderId = req.user._id.toString();
 
   if (!recipientId) return res.status(400).json({ message: "Recipient ID required" });
 
@@ -26,7 +26,9 @@ export const accessConversation = async (req, res) => {
       });
       chat = await chat.populate("participants", "username email status");
     } else {
-      if (!chat.participants.some(p => p._id.toString() === senderId.toString())) {
+      // Logic: If one user previously deleted the chat (removed themselves), add them back
+      const participantsStr = chat.participants.map(p => p._id.toString());
+      if (!participantsStr.includes(senderId)) {
         chat.participants.push(senderId);
         await chat.save();
       }
@@ -71,6 +73,7 @@ export const getMessages = async (req, res) => {
   const userId = req.user._id;
 
   try {
+    // Reset unread count for this user
     await Conversation.findByIdAndUpdate(chatId, {
       $set: { [`unreadCount.${userId.toString()}`]: 0 }
     });
@@ -91,14 +94,14 @@ export const getMessages = async (req, res) => {
 };
 
 /**
- * @desc    Save message to DUAL-BUCKETS (Crucial for Socket ID sync)
+ * @desc    Save message to DUAL-BUCKETS (Crucial logic)
  */
 export const saveMessageToBucket = async (chatId, senderId, text) => {
   try {
     const chat = await Conversation.findById(chatId);
     if (!chat) throw new Error("Conversation not found");
 
-    const participants = chat.participants; 
+    const participants = chat.participants.map(p => p.toString()); 
     const timestamp = new Date();
     const messageData = { senderId, text, timestamp };
 
@@ -131,16 +134,18 @@ export const saveMessageToBucket = async (chatId, senderId, text) => {
     });
 
     const savedBuckets = await Promise.all(savePromises);
-    // Return the message from the first bucket (it contains the new _id)
-    const savedMsg = savedBuckets[0].messages[savedBuckets[0].messages.length - 1];
+    
+    // Find the message from the sender's own bucket to return the correct MongoDB ID
+    const senderBucket = savedBuckets.find(b => b.ownerId.toString() === senderId.toString());
+    const savedMsg = senderBucket.messages[senderBucket.messages.length - 1];
 
-    const recipientId = participants.find(p => p.toString() !== senderId.toString());
+    const recipientId = participants.find(p => p !== senderId.toString());
 
     if (recipientId) {
       await Conversation.findByIdAndUpdate(chatId, {
         lastMessage: savedMsg,
         updatedAt: timestamp,
-        $inc: { [`unreadCount.${recipientId.toString()}`]: 1 }
+        $inc: { [`unreadCount.${recipientId}`]: 1 }
       });
     }
 
@@ -152,14 +157,13 @@ export const saveMessageToBucket = async (chatId, senderId, text) => {
 };
 
 /**
- * @desc    Delete a message (FIXED: Uses ownerId)
+ * @desc    Delete a message (Unsend vs Delete For Me)
  */
 export const deleteMessage = async (req, res) => {
   const { chatId, messageId } = req.params;
-  const userId = req.user._id;
+  const userId = req.user._id.toString();
 
   try {
-    // 1. Find the bucket using ownerId
     const bucket = await MessageBucket.findOne({
       conversationId: chatId,
       ownerId: userId,
@@ -171,15 +175,14 @@ export const deleteMessage = async (req, res) => {
     }
 
     const message = bucket.messages.id(messageId);
-    const isSender = message.senderId.toString() === userId.toString();
+    const isSender = message.senderId.toString() === userId;
 
     if (isSender) {
-      // UNSEND: Remove from EVERYONE'S buckets
+      // UNSEND: Remove from ALL buckets
       await MessageBucket.updateMany(
         { conversationId: chatId },
         { $pull: { messages: { _id: messageId } } }
       );
-
       return res.status(200).json({ action: "unsend" });
     } else {
       // DELETE FOR ME: Remove ONLY from requester's bucket
@@ -187,7 +190,6 @@ export const deleteMessage = async (req, res) => {
         { conversationId: chatId, ownerId: userId },
         { $pull: { messages: { _id: messageId } } }
       );
-
       return res.status(200).json({ action: "deleteForMe" });
     }
   } catch (error) {
