@@ -2,56 +2,51 @@ import { saveMessageToBucket } from '../controllers/chatController.js';
 import User from '../models/User.js';
 
 export const setupSocketEvents = (io) => {
-    // A Map to keep track of userId -> socketId
     const onlineUsers = new Map(); 
 
     io.on('connection', (socket) => {
         console.log(`📡 Signal Established: ${socket.id}`);
 
-        // 1. User goes Online
+        // 1. User Presence
         socket.on('user_online', async (userId) => {
             if (!userId) return;
-            
             socket.userId = userId;
             onlineUsers.set(userId, socket.id); 
 
             await User.findByIdAndUpdate(userId, { "status.isOnline": true });
-            
-            // Sync online list to all users
             io.emit('online_users_list', Array.from(onlineUsers.keys()));
             socket.broadcast.emit('user_status_change', { userId, isOnline: true });
         });
 
-        // 2. Joining a Chat Room
+        // 2. Chat Rooms
         socket.on('join_chat', (chatId) => {
             socket.join(chatId);
-            console.log(`🔒 User joined room: ${chatId}`);
+            console.log(`🔒 Room: ${chatId}`);
         });
 
-        // 3. Handling Real-Time Messages & Instant Sidebar Jump
+        socket.on('leave_chat', (chatId) => {
+            socket.leave(chatId);
+        });
+
+        // 3. Messages (FIXED Double Message Issue)
         socket.on('send_message', async (data) => {
-            const { chatId, senderId, recipientId, text } = data;
-            const timestamp = new Date();
+            const { chatId, senderId, recipientId, text, timestamp } = data;
 
             const messagePayload = {
-                chatId,
-                senderId,
-                text,
-                timestamp,
-                updatedAt: timestamp // This tells the sidebar where to sort
+                ...data,
+                timestamp: timestamp || new Date(), // Use frontend timestamp if available
             };
 
-            // ACTION A: Update the active chat window (if open)
-            io.to(chatId).emit('receive_message', messagePayload);
+            // ✅ FIX: Use socket.to(chatId).emit to send to OTHERS only
+            // This prevents the sender from receiving their own message again
+            socket.to(chatId).emit('receive_message', messagePayload);
 
-            // ACTION B: Force Sidebar Jump for the recipient 
-            // This works even if the recipient is looking at a different chat
+            // Notify sidebar for recipient (if they aren't in the room)
             const recipientSocketId = onlineUsers.get(recipientId);
             if (recipientSocketId) {
                 io.to(recipientSocketId).emit('sidebar_update', messagePayload);
             }
 
-            // PERSIST to Database
             try {
                 await saveMessageToBucket(chatId, senderId, text);
             } catch (err) {
@@ -59,11 +54,21 @@ export const setupSocketEvents = (io) => {
             }
         });
 
-        // 4. Disconnect Logic
+        // 4. Typing Status
+        socket.on('typing', ({ chatId, typing }) => {
+            socket.to(chatId).emit('typing_status', { chatId, typing });
+        });
+
+        // 5. Message Deletion (NEW)
+        socket.on('delete_message', ({ chatId, messageId }) => {
+            // Broadcast to the other user in the room to remove the UI element
+            socket.to(chatId).emit('message_deleted', { messageId });
+        });
+
+        // 6. Disconnect
         socket.on('disconnect', async () => {
             if (socket.userId) {
                 onlineUsers.delete(socket.userId);
-                
                 await User.findByIdAndUpdate(socket.userId, { 
                     "status.isOnline": false, 
                     "status.lastSeen": new Date() 

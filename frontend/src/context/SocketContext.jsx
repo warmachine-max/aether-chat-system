@@ -15,25 +15,28 @@ export const SocketProvider = ({ children }) => {
     const API_URL = import.meta.env.VITE_BACKEND_URL || "http://localhost:5000";
     
     if (user) {
-      // 1. Initialize connection
+      // 1. Initialize connection with better stability settings
       const newSocket = io(API_URL, {
         withCredentials: true,
         query: { userId: user._id },
-        transports: ['websocket', 'polling']
+        transports: ['websocket'], // Prioritize websocket for speed
+        reconnectionAttempts: 5,
       });
 
       setSocket(newSocket);
 
-      // 2. Signal Presence
-      newSocket.emit('user_online', user._id);
+      // 2. Initial Setup
+      newSocket.on('connect', () => {
+        console.log("Connected to Aether Signal Grid");
+        newSocket.emit('user_online', user._id);
+      });
 
-      // 3. LISTEN: Get the full list of online users immediately upon connection
-      // This ensures the sidebar has green dots right away
+      // 3. LISTEN: Get the full list of online users
       newSocket.on('online_users_list', (users) => {
         setOnlineUsers(users);
       });
 
-      // 4. LISTEN: Real-time status changes (User logs in/out)
+      // 4. LISTEN: Real-time status changes
       newSocket.on('user_status_change', ({ userId, isOnline }) => {
         setOnlineUsers(prev => {
           if (isOnline) {
@@ -43,14 +46,17 @@ export const SocketProvider = ({ children }) => {
         });
       });
 
+      // 5. Cleanup on logout/unmount
       return () => {
+        newSocket.off('connect');
         newSocket.off('online_users_list');
         newSocket.off('user_status_change');
-        newSocket.close();
+        newSocket.disconnect(); // Use disconnect for a cleaner exit
+        setSocket(null);
       };
     } else {
       if (socket) {
-        socket.close();
+        socket.disconnect();
         setSocket(null);
       }
     }
