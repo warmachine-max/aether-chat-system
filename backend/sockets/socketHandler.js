@@ -1,4 +1,4 @@
-import { saveMessageToBucket } from '../controllers/chatController.js';
+import { MessageBucket } from '../models/Message.js'; // Adjust path to your model
 import User from '../models/User.js';
 
 export const setupSocketEvents = (io) => {
@@ -20,49 +20,74 @@ export const setupSocketEvents = (io) => {
 
         // 2. Chat Rooms
         socket.on('join_chat', (chatId) => {
-            socket.join(chatId);
-            console.log(`🔒 Room: ${chatId}`);
+            socket.join(chatId.toString()); // Ensure string for room names
+            console.log(`🔒 Room Joined: ${chatId}`);
         });
 
         socket.on('leave_chat', (chatId) => {
-            socket.leave(chatId);
+            socket.leave(chatId.toString());
         });
 
-        // 3. Messages (FIXED Double Message Issue)
+        // 3. Messages (Optimized for Sync Deletion)
         socket.on('send_message', async (data) => {
-            const { chatId, senderId, recipientId, text, timestamp } = data;
-
-            const messagePayload = {
-                ...data,
-                timestamp: timestamp || new Date(), // Use frontend timestamp if available
-            };
-
-            // ✅ FIX: Use socket.to(chatId).emit to send to OTHERS only
-            // This prevents the sender from receiving their own message again
-            socket.to(chatId).emit('receive_message', messagePayload);
-
-            // Notify sidebar for recipient (if they aren't in the room)
-            const recipientSocketId = onlineUsers.get(recipientId);
-            if (recipientSocketId) {
-                io.to(recipientSocketId).emit('sidebar_update', messagePayload);
-            }
+            const { chatId, senderId, recipientId, text, _id: tempId } = data;
 
             try {
-                await saveMessageToBucket(chatId, senderId, text);
+                // A. Save to Database First
+                // This logic mirrors your saveMessageToBucket controller
+                const buckets = await MessageBucket.find({ conversationId: chatId });
+                
+                let savedMsg = null;
+
+                // We save the message to ALL participant buckets
+                const savePromises = buckets.map(async (bucket) => {
+                    bucket.messages.push({ senderId, text, timestamp: new Date() });
+                    const updatedBucket = await bucket.save();
+                    // Capture the last message added (the one with the new MongoDB _id)
+                    savedMsg = updatedBucket.messages[updatedBucket.messages.length - 1];
+                });
+
+                await Promise.all(savePromises);
+
+                // B. Prepare Payload with REAL ID
+                const messagePayload = {
+                    ...data,
+                    _id: savedMsg._id, // The real MongoDB ID
+                    timestamp: savedMsg.timestamp
+                };
+
+                // C. Broadcast to the recipient room
+                socket.to(chatId.toString()).emit('receive_message', messagePayload);
+
+                // D. IMPORTANT: Ack back to sender to replace their Temp ID with Real ID
+                socket.emit('message_ack', { 
+                    tempId: tempId, 
+                    realId: savedMsg._id 
+                });
+
+                // E. Sidebar update for recipient (if not in room)
+                const recipientSocketId = onlineUsers.get(recipientId);
+                if (recipientSocketId) {
+                    io.to(recipientSocketId).emit('sidebar_update', messagePayload);
+                }
+
             } catch (err) {
-                console.error("❌ Persistence Error:", err);
+                console.error("❌ Persistence/Socket Error:", err);
+                socket.emit('error', { message: "Failed to send message" });
             }
         });
 
         // 4. Typing Status
         socket.on('typing', ({ chatId, typing }) => {
-            socket.to(chatId).emit('typing_status', { chatId, typing });
+            socket.to(chatId.toString()).emit('typing_status', { chatId, typing });
         });
 
-        // 5. Message Deletion (NEW)
+        // 5. Message Deletion (Fixed Sync)
         socket.on('delete_message', ({ chatId, messageId }) => {
-            // Broadcast to the other user in the room to remove the UI element
-            socket.to(chatId).emit('message_deleted', { messageId });
+            // This broadcasts the delete command to the other user's ChatWindow.jsx
+            // Because of the 'message_ack' above, both users now have the same messageId
+            socket.to(chatId.toString()).emit('message_deleted', { messageId });
+            console.log(`🗑️ Message Deleted in Room ${chatId}: ${messageId}`);
         });
 
         // 6. Disconnect
