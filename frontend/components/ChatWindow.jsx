@@ -31,7 +31,7 @@ export default function ChatWindow({ chat }) {
     return () => document.removeEventListener('mousedown', closeMenu);
   }, []);
 
-  // 1. Fetch History
+  // 1. Fetch History & Join Room
   useEffect(() => {
     const fetchMessages = async () => {
       try {
@@ -45,31 +45,44 @@ export default function ChatWindow({ chat }) {
     return () => socket?.emit('leave_chat', chat._id);
   }, [chat._id, socket, API_URL]);
 
-  // 2. Real-time Listeners (Including Deletion)
+  // 2. Real-time Listeners (Fixed Duplicate Handling)
   useEffect(() => {
     if (!socket) return;
 
-    socket.on('receive_message', (msg) => {
+    const handleMessage = (msg) => {
       if (msg.chatId === chat._id) {
-        setMessages((prev) => [...prev, msg]);
+        setMessages((prev) => {
+          // Check if message already exists (by ID or by content/timestamp for optimistic messages)
+          const isDuplicate = prev.some(m => 
+            (msg._id && m._id === msg._id) || 
+            (m.senderId === msg.senderId && m.text === msg.text && m.timestamp === msg.timestamp)
+          );
+          
+          if (isDuplicate) return prev;
+          return [...prev, msg];
+        });
         setOtherUserTyping(false);
       }
-    });
+    };
 
-    socket.on('message_deleted', ({ messageId }) => {
+    const handleDelete = ({ messageId }) => {
       setMessages((prev) => prev.filter(m => m._id !== messageId));
-    });
+    };
 
-    socket.on('typing_status', ({ chatId, typing }) => {
+    const handleTyping = ({ chatId, typing }) => {
       if (chatId === chat._id) setOtherUserTyping(typing);
-    });
+    };
+
+    socket.on('receive_message', handleMessage);
+    socket.on('message_deleted', handleDelete);
+    socket.on('typing_status', handleTyping);
 
     return () => {
-      socket.off('receive_message');
-      socket.off('message_deleted');
-      socket.off('typing_status');
+      socket.off('receive_message', handleMessage);
+      socket.off('message_deleted', handleDelete);
+      socket.off('typing_status', handleTyping);
     };
-  }, [socket, chat._id]);
+  }, [socket, chat._id, user._id]);
 
   useEffect(() => {
     scrollRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -78,19 +91,27 @@ export default function ChatWindow({ chat }) {
   // 3. Action Handlers
   const handleSend = async (e) => {
     e.preventDefault();
-    if (!newMessage.trim() || !socket) return;
+    const cleanMsg = newMessage.trim();
+    if (!cleanMsg || !socket) return;
 
+    const timestamp = new Date().toISOString();
     const msgData = {
       chatId: chat._id,
       senderId: user._id,
       recipientId: otherUser?._id,
-      text: newMessage.trim(),
-      timestamp: new Date().toISOString(),
+      text: cleanMsg,
+      timestamp: timestamp,
     };
 
+    // Emit to server
     socket.emit('send_message', msgData);
+    
+    // Optimistic Update: Add to UI immediately
     setMessages((prev) => [...prev, msgData]);
+    
+    // Reset state
     setNewMessage('');
+    setIsTyping(false);
     socket.emit('typing', { chatId: chat._id, typing: false });
   };
 
@@ -173,7 +194,6 @@ export default function ChatWindow({ chat }) {
               
               <div className={`group flex flex-col ${isMe ? 'items-end' : 'items-start'} ${showTime ? 'mb-4' : 'mb-1'}`}>
                 <div className="flex items-center gap-2 max-w-[80%] relative">
-                  {/* UN-SEND BUTTON (Shows on Hover for sender) */}
                   {isMe && m._id && (
                     <button 
                       onClick={() => deleteMsg(m._id)}
@@ -216,7 +236,7 @@ export default function ChatWindow({ chat }) {
         <div className="relative flex items-center gap-3 max-w-5xl mx-auto w-full">
           <input 
             type="text"
-            className="w-full bg-zinc-900/80 border border-white/10 rounded-2xl py-4 pl-6 pr-14 focus:outline-none focus:ring-2 focus:ring-blue-500/20 text-sm text-white placeholder:text-zinc-600"
+            className="w-full bg-zinc-900/80 border border-white/10 rounded-2xl py-4 pl-6 pr-14 focus:outline-none focus:ring-2 focus:ring-blue-500/20 text-sm text-white placeholder:text-zinc-600 shadow-2xl"
             placeholder="Write a message..."
             value={newMessage}
             onChange={(e) => {
