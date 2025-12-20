@@ -1,4 +1,4 @@
-import { MessageBucket } from '../models/Message.js'; // Adjust path to your model
+import { MessageBucket } from '../models/MessageBucket.js'; // Adjust path to your model
 import User from '../models/User.js';
 
 export const setupSocketEvents = (io) => {
