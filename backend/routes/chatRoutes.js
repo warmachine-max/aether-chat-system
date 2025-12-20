@@ -2,23 +2,21 @@ import express from 'express';
 import { 
   accessConversation, 
   getMessages, 
-  getConversations ,
+  getConversations,
   searchUsers
 } from '../controllers/chatController.js';
 import { protect } from '../middleware/authMiddleware.js';
 
 const router = express.Router();
 
-// Get list of all my chats (Sidebar)
+// 1. Static/Specific Routes first
 router.get('/', protect, getConversations);
+router.get('/users/search', protect, searchUsers); // Added /search to be explicit
 
-// Open or Create a chat with a specific user
+// 2. Resource Access
 router.post('/access', protect, accessConversation);
 
-// Load message history for a specific chat
+// 3. Dynamic Parameters last
 router.get('/:chatId', protect, getMessages);
-
-router.get('/users', protect, searchUsers);
-
 
 export default router;

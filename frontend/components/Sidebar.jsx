@@ -11,7 +11,6 @@ const ChatItem = memo(({ chat, isActive, isOnline, onClick, formatTime, currentU
   const formatUnreadCount = (count) => {
     if (!count || count <= 0) return null;
     if (count > 99) return "99+";
-    if (count > 9) return "9+";
     return count;
   };
 
@@ -95,43 +94,60 @@ export default function Sidebar({ setSelectedChat, selectedChat }) {
     fetchChats();
   }, [API_URL]);
 
-  // 2. Real-time Reordering & Unread Handling
+  // 2. Real-time Reordering Engine
   useEffect(() => {
     if (!socket) return;
 
-    const handleMessage = (msg) => {
+    const handleIncomingMessage = (msg) => {
       setConversations((prev) => {
-        // Find existing chat
         const chatIndex = prev.findIndex((c) => c._id === msg.chatId);
 
         if (chatIndex !== -1) {
+          // EXISTING CHAT: Update and Move to Top
           const chatToUpdate = { ...prev[chatIndex] };
-          
-          const isCurrentlyOpen = selectedChat?._id === chatToUpdate._id;
+          const isCurrentlyOpen = selectedChat?._id === msg.chatId;
           const isSentByMe = msg.senderId === currentUser?._id;
 
-          // Update object
           chatToUpdate.lastMessage = msg;
-          chatToUpdate.updatedAt = new Date().toISOString();
-          chatToUpdate.unreadCount = (isCurrentlyOpen || isSentByMe) 
-            ? 0 
-            : (chatToUpdate.unreadCount || 0) + 1;
+          chatToUpdate.updatedAt = msg.updatedAt || new Date().toISOString();
 
-          // Remove old version and move to top
-          const remainingChats = prev.filter((_, idx) => idx !== chatIndex);
-          return [chatToUpdate, ...remainingChats];
+          // Live Unread Logic
+          if (!isCurrentlyOpen && !isSentByMe) {
+            chatToUpdate.unreadCount = (chatToUpdate.unreadCount || 0) + 1;
+          } else if (isCurrentlyOpen) {
+            chatToUpdate.unreadCount = 0;
+          }
+
+          const filtered = prev.filter((_, idx) => idx !== chatIndex);
+          return [chatToUpdate, ...filtered];
         } else {
-          // If message is from a NEW conversation not yet in sidebar, 
-          // a simple refresh or a specific 'new_chat' event might be needed.
+          // NEW CHAT: Not in sidebar yet, fetch metadata
+          fetchNewChat(msg.chatId);
           return prev;
         }
       });
     };
 
-    socket.on('receive_message', handleMessage);
-    return () => socket.off('receive_message', handleMessage);
-    // Added selectedChat?._id to dependencies to ensure listener knows which chat is open
-  }, [socket, selectedChat?._id, currentUser?._id]);
+    const fetchNewChat = async (chatId) => {
+      try {
+        const res = await axios.get(`${API_URL}/api/chats/${chatId}`, { withCredentials: true });
+        setConversations(prev => {
+          const alreadyExists = prev.find(c => c._id === res.data._id);
+          return alreadyExists ? prev : [res.data, ...prev];
+        });
+      } catch (err) {
+        console.error("Failed to fetch new signal metadata", err);
+      }
+    };
+
+    socket.on('receive_message', handleIncomingMessage);
+    socket.on('sidebar_update', handleIncomingMessage);
+
+    return () => {
+      socket.off('receive_message', handleIncomingMessage);
+      socket.off('sidebar_update', handleIncomingMessage);
+    };
+  }, [socket, selectedChat?._id, currentUser?._id, API_URL]);
 
   // 3. Search Users Logic
   useEffect(() => {
@@ -139,14 +155,14 @@ export default function Sidebar({ setSelectedChat, selectedChat }) {
       if (search.trim().length < 2) { setSearchResults([]); return; }
       setIsSearching(true);
       try {
-        const res = await axios.get(`${API_URL}/api/auth/users?search=${search}`, { withCredentials: true });
-        setSearchResults(res.data.filter(u => u._id !== currentUser?._id));
+        const res = await axios.get(`${API_URL}/api/chats/users/search?query=${search}`, { withCredentials: true });
+        setSearchResults(res.data);
       } catch (err) { console.error(err); } 
       finally { setIsSearching(false); }
     };
     const debounce = setTimeout(searchUsers, 400);
     return () => clearTimeout(debounce);
-  }, [search, currentUser?._id, API_URL]);
+  }, [search, API_URL]);
 
   const handleChatClick = useCallback((chat) => {
     setSelectedChat(chat);
@@ -162,12 +178,8 @@ export default function Sidebar({ setSelectedChat, selectedChat }) {
       setSearch('');
       setSearchResults([]);
       setConversations(prev => {
-        const exists = prev.find(c => c._id === res.data._id);
-        if (exists) {
-            const others = prev.filter(c => c._id !== res.data._id);
-            return [res.data, ...others];
-        }
-        return [res.data, ...prev];
+        const others = prev.filter(c => c._id !== res.data._id);
+        return [res.data, ...others];
       });
     } catch (err) { console.error("Failed to establish signal"); }
   };

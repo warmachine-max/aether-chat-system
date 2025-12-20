@@ -18,75 +18,73 @@ export default function ChatWindow({ chat }) {
   [chat, user._id]);
 
   const isOtherUserOnline = onlineUsers.includes(otherUser?._id);
+  const API_URL = useMemo(() => import.meta.env.VITE_BACKEND_URL || "http://localhost:5000", []);
 
-  // 1. Fetch History
+  // 1. Fetch History & Join Room
   useEffect(() => {
-    const API_URL = import.meta.env.VITE_BACKEND_URL || "http://localhost:5000";
     const fetchMessages = async () => {
       try {
         const res = await axios.get(`${API_URL}/api/chats/${chat._id}`, { withCredentials: true });
         setMessages(res.data);
-      } catch (err) { console.error(err); }
+      } catch (err) { console.error("History fetch error:", err); }
     };
+    
     fetchMessages();
     socket?.emit('join_chat', chat._id);
-  }, [chat._id, socket]);
 
-  // 2. Updated Socket Listener with De-duplication
+    return () => {
+      socket?.emit('leave_chat', chat._id);
+    };
+  }, [chat._id, socket, API_URL]);
+
+  // 2. Real-time Socket Listener
   useEffect(() => {
     if (!socket) return;
 
-    socket.on('receive_message', (msg) => {
+    const handleMessage = (msg) => {
       if (msg.chatId === chat._id) {
         setMessages((prev) => {
-          // CHECK FOR DUPLICATE: Don't add if message with same text and sender exists in last 2 seconds
+          // Prevent duplicates (Don't add if message from same sender with same text arrived < 1s ago)
           const isDuplicate = prev.some(m => 
+            m.senderId === msg.senderId && 
             m.text === msg.text && 
-            m.senderId === msg.senderId &&
-            Math.abs(new Date(m.timestamp) - new Date(msg.timestamp)) < 2000
+            Math.abs(new Date(m.timestamp) - new Date(msg.timestamp)) < 1000
           );
-          
           if (isDuplicate) return prev;
           return [...prev, msg];
         });
         setOtherUserTyping(false);
       }
-    });
+    };
 
-    socket.on('typing_status', ({ chatId, typing }) => {
+    const handleTyping = ({ chatId, typing }) => {
       if (chatId === chat._id) setOtherUserTyping(typing);
-    });
+    };
+
+    socket.on('receive_message', handleMessage);
+    socket.on('typing_status', handleTyping);
 
     return () => {
-      socket.off('receive_message');
-      socket.off('typing_status');
+      socket.off('receive_message', handleMessage);
+      socket.off('typing_status', handleTyping);
     };
   }, [socket, chat._id]);
 
-  // 3. Auto-scroll
+  // 3. Auto-scroll Logic
   useEffect(() => {
     scrollRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, otherUserTyping]);
 
-  // 4. Helper to format dates for dividers
-  const getMessageDateLabel = (dateString) => {
-    const date = new Date(dateString);
-    const today = new Date();
-    const yesterday = new Date();
-    yesterday.setDate(today.getDate() - 1);
-
-    if (date.toDateString() === today.toDateString()) return "Today";
-    if (date.toDateString() === yesterday.toDateString()) return "Yesterday";
-    return date.toLocaleDateString([], { month: 'long', day: 'numeric', year: 'numeric' });
-  };
-
+  // 4. Input & Typing Handlers
   const handleInputChange = (e) => {
     setNewMessage(e.target.value);
+    
     if (!isTyping) {
       setIsTyping(true);
       socket.emit('typing', { chatId: chat._id, typing: true });
     }
-    
+
+    // Debounce typing stop
     const lastTypingTime = new Date().getTime();
     setTimeout(() => {
       const timeNow = new Date().getTime();
@@ -99,27 +97,42 @@ export default function ChatWindow({ chat }) {
 
   const handleSend = (e) => {
     e.preventDefault();
-    if (!newMessage.trim()) return;
+    const cleanMessage = newMessage.trim();
+    if (!cleanMessage || !socket) return;
 
     const msgData = {
       chatId: chat._id,
       senderId: user._id,
-      text: newMessage,
+      recipientId: otherUser?._id, // Critical for Sidebar live updates
+      text: cleanMessage,
       timestamp: new Date().toISOString(),
     };
 
+    // Emit and Reset
     socket.emit('send_message', msgData);
     socket.emit('typing', { chatId: chat._id, typing: false });
     
-    // Optimistic Update (Add locally first for speed)
+    // Optimistic Update
     setMessages((prev) => [...prev, msgData]);
     setNewMessage('');
     setIsTyping(false);
   };
 
+  // 5. Date Label Helper
+  const getMessageDateLabel = (dateString) => {
+    const date = new Date(dateString);
+    const today = new Date();
+    const yesterday = new Date();
+    yesterday.setDate(today.getDate() - 1);
+
+    if (date.toDateString() === today.toDateString()) return "Today";
+    if (date.toDateString() === yesterday.toDateString()) return "Yesterday";
+    return date.toLocaleDateString([], { month: 'long', day: 'numeric', year: 'numeric' });
+  };
+
   return (
     <div className="flex flex-col h-full bg-[#050505] text-zinc-100">
-      {/* --- Top Bar --- */}
+      {/* Header */}
       <div className="px-6 py-4 border-b border-white/5 flex justify-between items-center backdrop-blur-xl bg-black/40 sticky top-0 z-10">
         <div className="flex items-center gap-4">
           <div className="relative">
@@ -144,13 +157,13 @@ export default function ChatWindow({ chat }) {
         </div>
       </div>
 
-      {/* --- Message Container --- */}
+      {/* Message Feed */}
       <div className="flex-1 overflow-y-auto px-6 py-8 custom-scrollbar">
         {messages.length === 0 && (
-            <div className="h-full flex flex-col items-center justify-center text-center opacity-30">
-                <ShieldCheck className="w-12 h-12 mb-4 text-zinc-700" />
-                <p className="text-[10px] uppercase tracking-[0.3em] font-bold">Encrypted Signal Established</p>
-            </div>
+          <div className="h-full flex flex-col items-center justify-center text-center opacity-30">
+            <ShieldCheck className="w-12 h-12 mb-4 text-zinc-700" />
+            <p className="text-[10px] uppercase tracking-[0.3em] font-bold">Encrypted Signal Established</p>
+          </div>
         )}
 
         {messages.map((m, i) => {
@@ -158,7 +171,6 @@ export default function ChatWindow({ chat }) {
           const showTime = i === messages.length - 1 || messages[i+1]?.senderId !== m.senderId;
           const time = new Date(m.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
           
-          // Logic for Date Dividers
           const currentDateLabel = getMessageDateLabel(m.timestamp);
           const previousDateLabel = i > 0 ? getMessageDateLabel(messages[i-1].timestamp) : null;
           const showDateDivider = currentDateLabel !== previousDateLabel;
@@ -174,7 +186,7 @@ export default function ChatWindow({ chat }) {
               )}
               
               <div className={`flex flex-col ${isMe ? 'items-end' : 'items-start'} ${showTime ? 'mb-4' : 'mb-1'}`}>
-                <div className={`px-4 py-2.5 rounded-2xl text-[13.5px] leading-relaxed transition-all shadow-md ${
+                <div className={`px-4 py-2.5 rounded-2xl text-[13.5px] leading-relaxed max-w-[80%] ${
                   isMe 
                   ? 'bg-blue-600 text-white rounded-tr-none' 
                   : 'bg-zinc-900 text-zinc-100 rounded-tl-none border border-white/5'
@@ -205,7 +217,7 @@ export default function ChatWindow({ chat }) {
         <div ref={scrollRef} />
       </div>
 
-      {/* --- Input Area --- */}
+      {/* Input Area */}
       <form onSubmit={handleSend} className="p-6 bg-transparent">
         <div className="relative flex items-center gap-3 max-w-5xl mx-auto w-full">
           <input 
@@ -218,7 +230,7 @@ export default function ChatWindow({ chat }) {
           <button 
             type="submit" 
             disabled={!newMessage.trim()}
-            className="absolute right-2 p-3 bg-blue-600 rounded-xl hover:bg-blue-500 disabled:opacity-30 disabled:grayscale transition-all shadow-lg shadow-blue-600/20 active:scale-95"
+            className="absolute right-2 p-3 bg-blue-600 rounded-xl hover:bg-blue-500 disabled:opacity-30 transition-all active:scale-95"
           >
             <Send className="w-4 h-4 text-white" />
           </button>

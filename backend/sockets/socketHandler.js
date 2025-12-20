@@ -2,54 +2,74 @@ import { saveMessageToBucket } from '../controllers/chatController.js';
 import User from '../models/User.js';
 
 export const setupSocketEvents = (io) => {
+    // A Map to keep track of userId -> socketId
+    const onlineUsers = new Map(); 
+
     io.on('connection', (socket) => {
         console.log(`📡 Signal Established: ${socket.id}`);
 
         // 1. User goes Online
         socket.on('user_online', async (userId) => {
-            socket.userId = userId; // Attach userId to the socket object
+            if (!userId) return;
+            
+            socket.userId = userId;
+            onlineUsers.set(userId, socket.id); 
+
             await User.findByIdAndUpdate(userId, { "status.isOnline": true });
             
-            // Tell everyone else this user is online
+            // Sync online list to all users
+            io.emit('online_users_list', Array.from(onlineUsers.keys()));
             socket.broadcast.emit('user_status_change', { userId, isOnline: true });
         });
 
-        // 2. Joining a Chat Room (chatId)
+        // 2. Joining a Chat Room
         socket.on('join_chat', (chatId) => {
             socket.join(chatId);
             console.log(`🔒 User joined room: ${chatId}`);
         });
 
-        // 3. Handling Real-Time Messages
+        // 3. Handling Real-Time Messages & Instant Sidebar Jump
         socket.on('send_message', async (data) => {
-            const { chatId, senderId, text } = data;
+            const { chatId, senderId, recipientId, text } = data;
+            const timestamp = new Date();
 
-            // FIRST: Emit to everyone in the room instantly (including sender)
-            // This makes the UI feel lightning fast
-            io.to(chatId).emit('receive_message', {
+            const messagePayload = {
                 chatId,
                 senderId,
                 text,
-                timestamp: new Date()
-            });
+                timestamp,
+                updatedAt: timestamp // This tells the sidebar where to sort
+            };
 
-            // SECOND: Save to MongoDB in the background (Bucket Pattern)
-            // This uses the "Very Important" logic we wrote in the controller
+            // ACTION A: Update the active chat window (if open)
+            io.to(chatId).emit('receive_message', messagePayload);
+
+            // ACTION B: Force Sidebar Jump for the recipient 
+            // This works even if the recipient is looking at a different chat
+            const recipientSocketId = onlineUsers.get(recipientId);
+            if (recipientSocketId) {
+                io.to(recipientSocketId).emit('sidebar_update', messagePayload);
+            }
+
+            // PERSIST to Database
             try {
                 await saveMessageToBucket(chatId, senderId, text);
             } catch (err) {
-                console.error("Failed to persist message:", err);
+                console.error("❌ Persistence Error:", err);
             }
         });
 
         // 4. Disconnect Logic
         socket.on('disconnect', async () => {
             if (socket.userId) {
+                onlineUsers.delete(socket.userId);
+                
                 await User.findByIdAndUpdate(socket.userId, { 
                     "status.isOnline": false, 
                     "status.lastSeen": new Date() 
                 });
-                // Broadcast that user is now offline
+
+                io.emit('online_users_list', Array.from(onlineUsers.keys()));
                 io.emit('user_status_change', { userId: socket.userId, isOnline: false });
             }
             console.log('👋 Signal Terminated');

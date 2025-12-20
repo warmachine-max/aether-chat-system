@@ -12,7 +12,6 @@ export const accessConversation = async (req, res) => {
   if (!recipientId) return res.status(400).json({ message: "Recipient ID required" });
 
   try {
-    // We sort by updatedAt here just in case multiple sessions exist
     let chat = await Conversation.findOne({
       participants: { $all: [senderId, recipientId] }
     })
@@ -23,7 +22,7 @@ export const accessConversation = async (req, res) => {
       chat = await Conversation.create({
         participants: [senderId, recipientId],
         unreadCount: {}, 
-        updatedAt: new Date() // Initialize timestamp
+        updatedAt: new Date() 
       });
       chat = await chat.populate("participants", "username email status");
     }
@@ -36,7 +35,7 @@ export const accessConversation = async (req, res) => {
 };
 
 /**
- * @desc    Get all conversations for the Sidebar
+ * @desc    Get all conversations for the Sidebar (Live-sort ready)
  */
 export const getConversations = async (req, res) => {
   try {
@@ -45,10 +44,11 @@ export const getConversations = async (req, res) => {
       participants: { $in: [req.user._id] }
     })
     .populate("participants", "username email status")
-    .sort({ updatedAt: -1 }); // CRITICAL: This ensures newest chats stay at the top
+    .sort({ updatedAt: -1 }); // Critical for Sidebar initial load order
 
     const formattedChats = chats.map(chat => {
       const chatObj = chat.toObject();
+      // Ensure the unreadCount is extracted specifically for the logged-in user
       chatObj.unreadCount = chat.unreadCount ? (chat.unreadCount.get(userId) || 0) : 0;
       return chatObj;
     });
@@ -60,19 +60,23 @@ export const getConversations = async (req, res) => {
 };
 
 /**
- * @desc    Fetch message history & RESET unread count
+ * @desc    Fetch message history (Owner-Specific) & RESET unread count
  */
 export const getMessages = async (req, res) => {
   const { chatId } = req.params;
-  const userId = req.user._id.toString();
+  const userId = req.user._id;
 
   try {
-    // Atomic reset of unread count
+    // 1. Atomic reset of unread count for the current user
     await Conversation.findByIdAndUpdate(chatId, {
-      $set: { [`unreadCount.${userId}`]: 0 }
+      $set: { [`unreadCount.${userId.toString()}`]: 0 }
     });
 
-    const latestBucket = await MessageBucket.findOne({ conversationId: chatId })
+    // 2. Fetch the latest bucket belonging to THIS user (Privacy Layer)
+    const latestBucket = await MessageBucket.findOne({ 
+      conversationId: chatId, 
+      ownerId: userId 
+    })
       .sort({ page: -1 })
       .lean();
 
@@ -85,54 +89,63 @@ export const getMessages = async (req, res) => {
 };
 
 /**
- * @desc    Logic to save a message & INCREMENT recipient unread count
+ * @desc    Save message to DUAL-BUCKETS (History Privacy Logic)
  */
 export const saveMessageToBucket = async (chatId, senderId, text) => {
   try {
-    // 1. Efficiently find or update the bucket using the "Bucket Pattern"
-    let bucket = await MessageBucket.findOneAndUpdate(
-      { 
-        conversationId: chatId, 
-        "messages.49": { $exists: false } // Checks if bucket is NOT full
-      },
-      { 
-        $push: { 
-          messages: { senderId, text, timestamp: new Date() } 
-        } 
-      },
-      { sort: { page: -1 }, new: true }
-    );
+    const chat = await Conversation.findById(chatId);
+    if (!chat) throw new Error("Conversation not found");
 
-    // 2. If no available space, create a new bucket page
-    if (!bucket) {
-      const lastBucket = await MessageBucket.findOne({ conversationId: chatId }).sort({ page: -1 });
-      const newPageNumber = lastBucket ? lastBucket.page + 1 : 1;
+    const participants = chat.participants; 
+    const timestamp = new Date();
+    const messageData = { senderId, text, timestamp };
 
-      bucket = await MessageBucket.create({
-        conversationId: chatId,
-        page: newPageNumber,
-        messages: [{ senderId, text, timestamp: new Date() }]
+    // SAVE COPIES FOR BOTH USERS
+    // This allows User A to delete history without affecting User B
+    const savePromises = participants.map(async (ownerId) => {
+      let bucket = await MessageBucket.findOneAndUpdate(
+        { 
+          conversationId: chatId, 
+          ownerId: ownerId, 
+          "messages.49": { $exists: false } 
+        },
+        { $push: { messages: messageData } },
+        { sort: { page: -1 }, new: true }
+      );
+
+      if (!bucket) {
+        const lastBucket = await MessageBucket.findOne({ 
+          conversationId: chatId, 
+          ownerId: ownerId 
+        }).sort({ page: -1 });
+        
+        const newPageNumber = lastBucket ? lastBucket.page + 1 : 1;
+        bucket = await MessageBucket.create({
+          conversationId: chatId,
+          ownerId: ownerId,
+          page: newPageNumber,
+          messages: [messageData]
+        });
+      }
+      return bucket;
+    });
+
+    await Promise.all(savePromises);
+
+    // UPDATE CONVERSATION (Metadata for Sidebar Reordering)
+    const recipientId = participants.find(p => p.toString() !== senderId.toString());
+
+    if (recipientId) {
+      await Conversation.findByIdAndUpdate(chatId, {
+        lastMessage: messageData,
+        updatedAt: timestamp, // Crucial for sorting on refresh
+        $inc: { [`unreadCount.${recipientId.toString()}`]: 1 }
       });
     }
 
-    // 3. UPDATE CONVERSATION METADATA (Reordering & Unread logic)
-    const chat = await Conversation.findById(chatId);
-    if (chat) {
-      const recipientId = chat.participants.find(p => p.toString() !== senderId.toString());
-
-      if (recipientId) {
-        await Conversation.findByIdAndUpdate(chatId, {
-          lastMessage: { text, senderId, timestamp: new Date() },
-          // FIX: Manually updating updatedAt triggers the sort order for the sidebar
-          updatedAt: new Date(), 
-          $inc: { [`unreadCount.${recipientId.toString()}`]: 1 }
-        });
-      }
-    }
-
-    return bucket;
+    return { success: true };
   } catch (error) {
-    console.error("Bucket Save Error Details:", error);
+    console.error("Save Message Error:", error);
     throw error;
   }
 };
