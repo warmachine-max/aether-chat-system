@@ -26,7 +26,6 @@ export const accessConversation = async (req, res) => {
       });
       chat = await chat.populate("participants", "username email status");
     } else {
-      // Logic: If one user previously deleted the chat, add them back to participants
       if (!chat.participants.some(p => p._id.toString() === senderId.toString())) {
         chat.participants.push(senderId);
         await chat.save();
@@ -41,7 +40,7 @@ export const accessConversation = async (req, res) => {
 };
 
 /**
- * @desc    Get all conversations for the Sidebar (Live-sort ready)
+ * @desc    Get all conversations for the Sidebar
  */
 export const getConversations = async (req, res) => {
   try {
@@ -65,7 +64,7 @@ export const getConversations = async (req, res) => {
 };
 
 /**
- * @desc    Fetch message history (Owner-Specific) & RESET unread count
+ * @desc    Fetch message history (Owner-Specific)
  */
 export const getMessages = async (req, res) => {
   const { chatId } = req.params;
@@ -92,7 +91,7 @@ export const getMessages = async (req, res) => {
 };
 
 /**
- * @desc    Save message to DUAL-BUCKETS (History Privacy Logic)
+ * @desc    Save message to DUAL-BUCKETS (Crucial for Socket ID sync)
  */
 export const saveMessageToBucket = async (chatId, senderId, text) => {
   try {
@@ -132,6 +131,7 @@ export const saveMessageToBucket = async (chatId, senderId, text) => {
     });
 
     const savedBuckets = await Promise.all(savePromises);
+    // Return the message from the first bucket (it contains the new _id)
     const savedMsg = savedBuckets[0].messages[savedBuckets[0].messages.length - 1];
 
     const recipientId = participants.find(p => p.toString() !== senderId.toString());
@@ -144,7 +144,7 @@ export const saveMessageToBucket = async (chatId, senderId, text) => {
       });
     }
 
-    return savedMsg; // Return the message with its new MongoDB _id
+    return savedMsg; 
   } catch (error) {
     console.error("Save Message Error:", error);
     throw error;
@@ -152,62 +152,47 @@ export const saveMessageToBucket = async (chatId, senderId, text) => {
 };
 
 /**
- * @desc    Delete a specific message for EVERYONE (Unsend)
+ * @desc    Delete a message (FIXED: Uses ownerId)
  */
 export const deleteMessage = async (req, res) => {
   const { chatId, messageId } = req.params;
   const userId = req.user._id;
 
   try {
-    // 1. Find the bucket containing this message to check ownership
-    // We look for the message specifically in the requester's bucket
+    // 1. Find the bucket using ownerId
     const bucket = await MessageBucket.findOne({
       conversationId: chatId,
-      participantId: userId,
+      ownerId: userId,
       "messages._id": messageId
     });
 
     if (!bucket) {
-      return res.status(404).json({ message: "Message not found in your history" });
+      return res.status(404).json({ message: "Message not found" });
     }
 
-    // Find the specific message object in the array
     const message = bucket.messages.id(messageId);
     const isSender = message.senderId.toString() === userId.toString();
 
     if (isSender) {
-      /**
-       * SCENARIO A: UNSEND (Sender Deletes)
-       * Remove from ALL participant buckets so no one can see it.
-       */
-      const result = await MessageBucket.updateMany(
+      // UNSEND: Remove from EVERYONE'S buckets
+      await MessageBucket.updateMany(
         { conversationId: chatId },
         { $pull: { messages: { _id: messageId } } }
       );
 
-      return res.status(200).json({ 
-        message: "Message unsent for everyone", 
-        action: "unsend" 
-      });
+      return res.status(200).json({ action: "unsend" });
     } else {
-      /**
-       * SCENARIO B: DELETE FOR ME (Recipient Deletes)
-       * Pull ONLY from the current user's bucket.
-       * The sender still keeps their copy.
-       */
+      // DELETE FOR ME: Remove ONLY from requester's bucket
       await MessageBucket.updateOne(
-        { conversationId: chatId, participantId: userId },
+        { conversationId: chatId, ownerId: userId },
         { $pull: { messages: { _id: messageId } } }
       );
 
-      return res.status(200).json({ 
-        message: "Message deleted for you", 
-        action: "deleteForMe" 
-      });
+      return res.status(200).json({ action: "deleteForMe" });
     }
   } catch (error) {
     console.error("Delete Error:", error);
-    res.status(500).json({ message: "Failed to process message deletion" });
+    res.status(500).json({ message: "Failed to delete" });
   }
 };
 
@@ -227,21 +212,17 @@ export const clearHistory = async (req, res) => {
 };
 
 /**
- * @desc    Delete Chat (Remove from Sidebar + Wipe local history)
+ * @desc    Delete Chat (Sidebar + Wipe)
  */
 export const deleteChat = async (req, res) => {
   const { chatId } = req.params;
   const userId = req.user._id;
 
   try {
-    // 1. Wipe private history
     await MessageBucket.deleteMany({ conversationId: chatId, ownerId: userId });
-
-    // 2. Remove user from conversation participants
     await Conversation.findByIdAndUpdate(chatId, {
       $pull: { participants: userId }
     });
-
     res.status(200).json({ message: "Conversation removed" });
   } catch (error) {
     res.status(500).json({ message: "Failed to delete chat" });
@@ -270,6 +251,6 @@ export const searchUsers = async (req, res) => {
 
     res.status(200).json(users);
   } catch (error) {
-    res.status(500).json({ message: "Error searching for users" });
+    res.status(500).json({ message: "Error searching" });
   }
 };
