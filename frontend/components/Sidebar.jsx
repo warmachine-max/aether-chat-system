@@ -288,6 +288,7 @@ export default function Sidebar({ setSelectedChat, selectedChat }) {
             <p className="text-[10px] font-black uppercase tracking-[0.3em]">No Active Signals</p>
           </div>
         )}
+        
       </div>
     </div>
   );
