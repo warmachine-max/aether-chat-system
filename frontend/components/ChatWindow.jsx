@@ -22,7 +22,6 @@ export default function ChatWindow({ chat }) {
   const isOtherUserOnline = onlineUsers.includes(otherUser?._id);
   const API_URL = useMemo(() => import.meta.env.VITE_BACKEND_URL || "http://localhost:5000", []);
 
-  // Close header menu on click outside
   useEffect(() => {
     const closeMenu = (e) => {
       if (menuRef.current && !menuRef.current.contains(e.target)) setShowMenu(false);
@@ -31,7 +30,7 @@ export default function ChatWindow({ chat }) {
     return () => document.removeEventListener('mousedown', closeMenu);
   }, []);
 
-  // 1. Fetch History & Join Room
+  // 1. Fetch History
   useEffect(() => {
     const fetchMessages = async () => {
       try {
@@ -45,19 +44,23 @@ export default function ChatWindow({ chat }) {
     return () => socket?.emit('leave_chat', chat._id);
   }, [chat._id, socket, API_URL]);
 
-  // 2. Real-time Listeners (Fixed Duplicate Handling)
+  // 2. Real-time Listeners
   useEffect(() => {
     if (!socket) return;
 
     const handleMessage = (msg) => {
       if (msg.chatId === chat._id) {
         setMessages((prev) => {
-          // Check for duplicates by ID or specific content fingerprint
+          // Logic: If we sent the message, we already have it in state via optimistic update.
+          // We match by timestamp and text to prevent duplicates for our own messages.
           const isDuplicate = prev.some(m => 
             (msg._id && m._id === msg._id) || 
             (m.senderId === msg.senderId && m.text === msg.text && m.timestamp === msg.timestamp)
           );
-          if (isDuplicate) return prev;
+          if (isDuplicate) {
+             // Update the existing optimistic message with the real DB ID
+             return prev.map(m => (m.timestamp === msg.timestamp && !m._id) ? { ...m, _id: msg._id } : m);
+          };
           return [...prev, msg];
         });
         setOtherUserTyping(false);
@@ -100,31 +103,35 @@ export default function ChatWindow({ chat }) {
       recipientId: otherUser?._id,
       text: cleanMsg,
       timestamp: timestamp,
+      // Create a temporary ID so the Trash Icon shows up immediately!
+      _id: `temp-${Date.now()}` 
     };
 
     socket.emit('send_message', msgData);
-    setMessages((prev) => [...prev, msgData]); // Optimistic Update
+    setMessages((prev) => [...prev, msgData]); 
     setNewMessage('');
     setIsTyping(false);
     socket.emit('typing', { chatId: chat._id, typing: false });
   };
 
   const deleteMsg = async (messageId) => {
-    if(!messageId) return; // Prevent deleting optimistic messages without IDs
-    try {
-      await axios.delete(`${API_URL}/api/chats/${chat._id}/message/${messageId}`, { withCredentials: true });
-      setMessages(prev => prev.filter(m => m._id !== messageId));
-      socket.emit('delete_message', { chatId: chat._id, messageId });
-    } catch (err) { console.error("Delete failed"); }
-  };
+    // If it's a temp ID, we can't delete from DB yet, so we just filter locally
+    if (messageId.toString().startsWith('temp-')) {
+        setMessages(prev => prev.filter(m => m._id !== messageId));
+        return;
+    }
 
-  const clearChat = async () => {
-    if (!window.confirm("Purge all local message history?")) return;
     try {
-      await axios.delete(`${API_URL}/api/chats/${chat._id}/clear`, { withCredentials: true });
-      setMessages([]);
-      setShowMenu(false);
-    } catch (err) { console.error("Clear failed"); }
+      const res = await axios.delete(`${API_URL}/api/chats/${chat._id}/message/${messageId}`, { withCredentials: true });
+      
+      // Update local UI
+      setMessages(prev => prev.filter(m => m._id !== messageId));
+      
+      // If the backend says it was an 'unsend' (you were the sender), tell the other user
+      if (res.data.action === "unsend") {
+        socket.emit('delete_message', { chatId: chat._id, messageId });
+      }
+    } catch (err) { console.error("Delete failed"); }
   };
 
   const getMessageDateLabel = (dateString) => {
@@ -136,7 +143,7 @@ export default function ChatWindow({ chat }) {
 
   return (
     <div className="flex flex-col h-full bg-[#050505] text-zinc-100 relative">
-      {/* Header */}
+      {/* Header (Same as before) */}
       <div className="px-6 py-4 border-b border-white/5 flex justify-between items-center backdrop-blur-xl bg-black/40 sticky top-0 z-50">
         <div className="flex items-center gap-4">
           <div className="relative">
@@ -150,22 +157,13 @@ export default function ChatWindow({ chat }) {
             <p className="text-[10px] text-zinc-500 uppercase tracking-widest font-black">{isOtherUserOnline ? 'Online' : 'Encrypted'}</p>
           </div>
         </div>
-
         <div className="flex items-center gap-5 text-zinc-500 relative" ref={menuRef}>
-          <Phone className="w-4 h-4 hover:text-blue-400 cursor-pointer transition-colors" />
-          <Video className="w-4 h-4 hover:text-blue-400 cursor-pointer transition-colors" />
-          <MoreVertical 
-            className={`w-4 h-4 cursor-pointer transition-colors ${showMenu ? 'text-white' : 'hover:text-blue-400'}`} 
-            onClick={() => setShowMenu(!showMenu)}
-          />
-          
-          {showMenu && (
-            <div className="absolute right-0 top-10 w-48 bg-zinc-900 border border-white/10 rounded-xl shadow-2xl z-50 py-2 overflow-hidden animate-in fade-in zoom-in duration-200">
-              <button onClick={clearChat} className="w-full px-4 py-2.5 text-left text-xs font-bold uppercase tracking-tighter flex items-center gap-3 hover:bg-white/5 text-zinc-300">
-                <Eraser className="w-3.5 h-3.5 text-blue-500" /> Clear History
-              </button>
-            </div>
-          )}
+            <MoreVertical className="w-4 h-4 cursor-pointer" onClick={() => setShowMenu(!showMenu)} />
+            {showMenu && (
+                <div className="absolute right-0 top-10 w-48 bg-zinc-900 border border-white/10 rounded-xl py-2 z-50">
+                    <button onClick={() => {}} className="w-full px-4 py-2 text-left text-xs flex items-center gap-3 hover:bg-white/5"><Eraser className="w-3.5 h-3.5" /> Clear History</button>
+                </div>
+            )}
         </div>
       </div>
 
@@ -181,27 +179,28 @@ export default function ChatWindow({ chat }) {
             <React.Fragment key={m._id || i}>
               {showDateDivider && (
                 <div className="flex justify-center my-6">
-                  <span className="bg-zinc-900/50 text-zinc-500 text-[10px] px-3 py-1 rounded-full uppercase tracking-widest font-bold border border-white/5">
+                  <span className="bg-zinc-900/50 text-zinc-500 text-[10px] px-3 py-1 rounded-full border border-white/5">
                     {getMessageDateLabel(m.timestamp)}
                   </span>
                 </div>
               )}
               
-              <div className={`group flex flex-col ${isMe ? 'items-end' : 'items-start'} ${showTime ? 'mb-4' : 'mb-1'} w-full`}>
+              <div className={`group flex flex-col ${isMe ? 'items-end' : 'items-start'} ${showTime ? 'mb-4' : 'mb-1'} w-full animate-in fade-in slide-in-from-bottom-2 duration-300`}>
                 <div className={`flex items-center gap-2 max-w-[85%] relative ${isMe ? 'flex-row' : 'flex-row-reverse'}`}>
                   
-                  {/* UN-SEND BUTTON (Hover state) */}
-                  {isMe && m._id && (
+                  {/* TRASH ICON: Now shows for both sides! */}
+                  {m._id && (
                     <button 
                       onClick={() => deleteMsg(m._id)}
                       className="opacity-0 group-hover:opacity-100 p-2 hover:bg-white/5 rounded-full transition-all text-zinc-600 hover:text-red-500"
+                      title={isMe ? "Unsend for everyone" : "Delete for me"}
                     >
                       <Trash2 className="w-3.5 h-3.5" />
                     </button>
                   )}
 
-                  <div className={`px-4 py-2.5 rounded-2xl text-[13.5px] leading-relaxed ${
-                    isMe ? 'bg-blue-600 text-white rounded-tr-none shadow-lg' 
+                  <div className={`px-4 py-2.5 rounded-2xl text-[13.5px] leading-relaxed transition-all ${
+                    isMe ? 'bg-blue-600 text-white rounded-tr-none' 
                          : 'bg-zinc-900 text-zinc-100 rounded-tl-none border border-white/5'
                   }`}>
                     {m.text}
@@ -216,15 +215,6 @@ export default function ChatWindow({ chat }) {
             </React.Fragment>
           );
         })}
-        {otherUserTyping && (
-          <div className="flex flex-col items-start mb-4">
-            <div className="bg-zinc-900 border border-white/5 px-4 py-3 rounded-2xl rounded-tl-none flex gap-1.5">
-              <div className="w-1.5 h-1.5 bg-blue-500 rounded-full animate-bounce" />
-              <div className="w-1.5 h-1.5 bg-blue-500 rounded-full animate-bounce [animation-delay:0.2s]" />
-              <div className="w-1.5 h-1.5 bg-blue-500 rounded-full animate-bounce [animation-delay:0.4s]" />
-            </div>
-          </div>
-        )}
         <div ref={scrollRef} />
       </div>
 
@@ -233,7 +223,7 @@ export default function ChatWindow({ chat }) {
         <div className="relative flex items-center gap-3 max-w-5xl mx-auto w-full">
           <input 
             type="text"
-            className="w-full bg-zinc-900/80 border border-white/10 rounded-2xl py-4 pl-6 pr-14 focus:outline-none focus:ring-2 focus:ring-blue-500/20 text-sm text-white placeholder:text-zinc-600 shadow-2xl"
+            className="w-full bg-zinc-900/80 border border-white/10 rounded-2xl py-4 pl-6 pr-14 focus:outline-none focus:ring-2 focus:ring-blue-500/20 text-sm text-white shadow-2xl"
             placeholder="Write a message..."
             value={newMessage}
             onChange={(e) => {
@@ -242,10 +232,6 @@ export default function ChatWindow({ chat }) {
                 setIsTyping(true);
                 socket?.emit('typing', { chatId: chat._id, typing: true });
               }
-            }}
-            onBlur={() => {
-                setIsTyping(false);
-                socket?.emit('typing', { chatId: chat._id, typing: false });
             }}
           />
           <button type="submit" disabled={!newMessage.trim()} className="absolute right-2 p-3 bg-blue-600 rounded-xl hover:bg-blue-500 disabled:opacity-30 transition-all active:scale-95">

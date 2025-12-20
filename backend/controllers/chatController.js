@@ -159,20 +159,55 @@ export const deleteMessage = async (req, res) => {
   const userId = req.user._id;
 
   try {
-    // 1. Pull the message from ALL participant buckets
-    // Logic: Only succeeds if the requester is the original sender
-    const result = await MessageBucket.updateMany(
-      { conversationId: chatId },
-      { $pull: { messages: { _id: messageId, senderId: userId } } }
-    );
+    // 1. Find the bucket containing this message to check ownership
+    // We look for the message specifically in the requester's bucket
+    const bucket = await MessageBucket.findOne({
+      conversationId: chatId,
+      participantId: userId,
+      "messages._id": messageId
+    });
 
-    if (result.modifiedCount === 0) {
-      return res.status(403).json({ message: "Could not delete: Message not found or unauthorized" });
+    if (!bucket) {
+      return res.status(404).json({ message: "Message not found in your history" });
     }
 
-    res.status(200).json({ message: "Message unsent successfully" });
+    // Find the specific message object in the array
+    const message = bucket.messages.id(messageId);
+    const isSender = message.senderId.toString() === userId.toString();
+
+    if (isSender) {
+      /**
+       * SCENARIO A: UNSEND (Sender Deletes)
+       * Remove from ALL participant buckets so no one can see it.
+       */
+      const result = await MessageBucket.updateMany(
+        { conversationId: chatId },
+        { $pull: { messages: { _id: messageId } } }
+      );
+
+      return res.status(200).json({ 
+        message: "Message unsent for everyone", 
+        action: "unsend" 
+      });
+    } else {
+      /**
+       * SCENARIO B: DELETE FOR ME (Recipient Deletes)
+       * Pull ONLY from the current user's bucket.
+       * The sender still keeps their copy.
+       */
+      await MessageBucket.updateOne(
+        { conversationId: chatId, participantId: userId },
+        { $pull: { messages: { _id: messageId } } }
+      );
+
+      return res.status(200).json({ 
+        message: "Message deleted for you", 
+        action: "deleteForMe" 
+      });
+    }
   } catch (error) {
-    res.status(500).json({ message: "Failed to delete message" });
+    console.error("Delete Error:", error);
+    res.status(500).json({ message: "Failed to process message deletion" });
   }
 };
 
