@@ -25,6 +25,12 @@ export const accessConversation = async (req, res) => {
         updatedAt: new Date() 
       });
       chat = await chat.populate("participants", "username email status");
+    } else {
+      // Logic: If one user previously deleted the chat, add them back to participants
+      if (!chat.participants.some(p => p._id.toString() === senderId.toString())) {
+        chat.participants.push(senderId);
+        await chat.save();
+      }
     }
 
     res.status(200).json(chat);
@@ -44,11 +50,10 @@ export const getConversations = async (req, res) => {
       participants: { $in: [req.user._id] }
     })
     .populate("participants", "username email status")
-    .sort({ updatedAt: -1 }); // Critical for Sidebar initial load order
+    .sort({ updatedAt: -1 });
 
     const formattedChats = chats.map(chat => {
       const chatObj = chat.toObject();
-      // Ensure the unreadCount is extracted specifically for the logged-in user
       chatObj.unreadCount = chat.unreadCount ? (chat.unreadCount.get(userId) || 0) : 0;
       return chatObj;
     });
@@ -67,18 +72,16 @@ export const getMessages = async (req, res) => {
   const userId = req.user._id;
 
   try {
-    // 1. Atomic reset of unread count for the current user
     await Conversation.findByIdAndUpdate(chatId, {
       $set: { [`unreadCount.${userId.toString()}`]: 0 }
     });
 
-    // 2. Fetch the latest bucket belonging to THIS user (Privacy Layer)
     const latestBucket = await MessageBucket.findOne({ 
       conversationId: chatId, 
       ownerId: userId 
     })
-      .sort({ page: -1 })
-      .lean();
+    .sort({ page: -1 })
+    .lean();
 
     if (!latestBucket) return res.status(200).json([]);
 
@@ -100,8 +103,6 @@ export const saveMessageToBucket = async (chatId, senderId, text) => {
     const timestamp = new Date();
     const messageData = { senderId, text, timestamp };
 
-    // SAVE COPIES FOR BOTH USERS
-    // This allows User A to delete history without affecting User B
     const savePromises = participants.map(async (ownerId) => {
       let bucket = await MessageBucket.findOneAndUpdate(
         { 
@@ -130,20 +131,20 @@ export const saveMessageToBucket = async (chatId, senderId, text) => {
       return bucket;
     });
 
-    await Promise.all(savePromises);
+    const savedBuckets = await Promise.all(savePromises);
+    const savedMsg = savedBuckets[0].messages[savedBuckets[0].messages.length - 1];
 
-    // UPDATE CONVERSATION (Metadata for Sidebar Reordering)
     const recipientId = participants.find(p => p.toString() !== senderId.toString());
 
     if (recipientId) {
       await Conversation.findByIdAndUpdate(chatId, {
-        lastMessage: messageData,
-        updatedAt: timestamp, // Crucial for sorting on refresh
+        lastMessage: savedMsg,
+        updatedAt: timestamp,
         $inc: { [`unreadCount.${recipientId.toString()}`]: 1 }
       });
     }
 
-    return { success: true };
+    return savedMsg; // Return the message with its new MongoDB _id
   } catch (error) {
     console.error("Save Message Error:", error);
     throw error;
@@ -151,7 +152,69 @@ export const saveMessageToBucket = async (chatId, senderId, text) => {
 };
 
 /**
- * @desc    Search Users logic
+ * @desc    Delete a specific message for EVERYONE (Unsend)
+ */
+export const deleteMessage = async (req, res) => {
+  const { chatId, messageId } = req.params;
+  const userId = req.user._id;
+
+  try {
+    // 1. Pull the message from ALL participant buckets
+    // Logic: Only succeeds if the requester is the original sender
+    const result = await MessageBucket.updateMany(
+      { conversationId: chatId },
+      { $pull: { messages: { _id: messageId, senderId: userId } } }
+    );
+
+    if (result.modifiedCount === 0) {
+      return res.status(403).json({ message: "Could not delete: Message not found or unauthorized" });
+    }
+
+    res.status(200).json({ message: "Message unsent successfully" });
+  } catch (error) {
+    res.status(500).json({ message: "Failed to delete message" });
+  }
+};
+
+/**
+ * @desc    Clear entire history for ONE user
+ */
+export const clearHistory = async (req, res) => {
+  const { chatId } = req.params;
+  const userId = req.user._id;
+
+  try {
+    await MessageBucket.deleteMany({ conversationId: chatId, ownerId: userId });
+    res.status(200).json({ message: "History cleared locally" });
+  } catch (error) {
+    res.status(500).json({ message: "Error clearing history" });
+  }
+};
+
+/**
+ * @desc    Delete Chat (Remove from Sidebar + Wipe local history)
+ */
+export const deleteChat = async (req, res) => {
+  const { chatId } = req.params;
+  const userId = req.user._id;
+
+  try {
+    // 1. Wipe private history
+    await MessageBucket.deleteMany({ conversationId: chatId, ownerId: userId });
+
+    // 2. Remove user from conversation participants
+    await Conversation.findByIdAndUpdate(chatId, {
+      $pull: { participants: userId }
+    });
+
+    res.status(200).json({ message: "Conversation removed" });
+  } catch (error) {
+    res.status(500).json({ message: "Failed to delete chat" });
+  }
+};
+
+/**
+ * @desc    Search Users
  */
 export const searchUsers = async (req, res) => {
   const { query } = req.query;
