@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import axios from 'axios';
-import { Send, ShieldCheck, Info, Phone, Video, MoreVertical, Trash2, Eraser } from 'lucide-react';
+import { Send, Phone, Video, MoreVertical, Trash2, Eraser } from 'lucide-react';
 import { useSocket } from '../src/context/SocketContext';
 import { useAuth } from '../src/context/AuthContext';
 
@@ -52,12 +52,11 @@ export default function ChatWindow({ chat }) {
     const handleMessage = (msg) => {
       if (msg.chatId === chat._id) {
         setMessages((prev) => {
-          // Check if message already exists (by ID or by content/timestamp for optimistic messages)
+          // Check for duplicates by ID or specific content fingerprint
           const isDuplicate = prev.some(m => 
             (msg._id && m._id === msg._id) || 
             (m.senderId === msg.senderId && m.text === msg.text && m.timestamp === msg.timestamp)
           );
-          
           if (isDuplicate) return prev;
           return [...prev, msg];
         });
@@ -82,7 +81,7 @@ export default function ChatWindow({ chat }) {
       socket.off('message_deleted', handleDelete);
       socket.off('typing_status', handleTyping);
     };
-  }, [socket, chat._id, user._id]);
+  }, [socket, chat._id]);
 
   useEffect(() => {
     scrollRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -103,19 +102,15 @@ export default function ChatWindow({ chat }) {
       timestamp: timestamp,
     };
 
-    // Emit to server
     socket.emit('send_message', msgData);
-    
-    // Optimistic Update: Add to UI immediately
-    setMessages((prev) => [...prev, msgData]);
-    
-    // Reset state
+    setMessages((prev) => [...prev, msgData]); // Optimistic Update
     setNewMessage('');
     setIsTyping(false);
     socket.emit('typing', { chatId: chat._id, typing: false });
   };
 
   const deleteMsg = async (messageId) => {
+    if(!messageId) return; // Prevent deleting optimistic messages without IDs
     try {
       await axios.delete(`${API_URL}/api/chats/${chat._id}/message/${messageId}`, { withCredentials: true });
       setMessages(prev => prev.filter(m => m._id !== messageId));
@@ -192,19 +187,21 @@ export default function ChatWindow({ chat }) {
                 </div>
               )}
               
-              <div className={`group flex flex-col ${isMe ? 'items-end' : 'items-start'} ${showTime ? 'mb-4' : 'mb-1'}`}>
-                <div className="flex items-center gap-2 max-w-[80%] relative">
+              <div className={`group flex flex-col ${isMe ? 'items-end' : 'items-start'} ${showTime ? 'mb-4' : 'mb-1'} w-full`}>
+                <div className={`flex items-center gap-2 max-w-[85%] relative ${isMe ? 'flex-row' : 'flex-row-reverse'}`}>
+                  
+                  {/* UN-SEND BUTTON (Hover state) */}
                   {isMe && m._id && (
                     <button 
                       onClick={() => deleteMsg(m._id)}
-                      className="opacity-0 group-hover:opacity-100 p-1.5 hover:bg-white/10 rounded-lg transition-all text-zinc-600 hover:text-red-500"
+                      className="opacity-0 group-hover:opacity-100 p-2 hover:bg-white/5 rounded-full transition-all text-zinc-600 hover:text-red-500"
                     >
                       <Trash2 className="w-3.5 h-3.5" />
                     </button>
                   )}
 
                   <div className={`px-4 py-2.5 rounded-2xl text-[13.5px] leading-relaxed ${
-                    isMe ? 'bg-blue-600 text-white rounded-tr-none shadow-lg shadow-blue-900/20' 
+                    isMe ? 'bg-blue-600 text-white rounded-tr-none shadow-lg' 
                          : 'bg-zinc-900 text-zinc-100 rounded-tl-none border border-white/5'
                   }`}>
                     {m.text}
@@ -232,7 +229,7 @@ export default function ChatWindow({ chat }) {
       </div>
 
       {/* Input Area */}
-      <form onSubmit={handleSend} className="p-6 bg-transparent">
+      <form onSubmit={handleSend} className="p-6">
         <div className="relative flex items-center gap-3 max-w-5xl mx-auto w-full">
           <input 
             type="text"
@@ -243,8 +240,12 @@ export default function ChatWindow({ chat }) {
               setNewMessage(e.target.value);
               if(!isTyping) {
                 setIsTyping(true);
-                socket.emit('typing', { chatId: chat._id, typing: true });
+                socket?.emit('typing', { chatId: chat._id, typing: true });
               }
+            }}
+            onBlur={() => {
+                setIsTyping(false);
+                socket?.emit('typing', { chatId: chat._id, typing: false });
             }}
           />
           <button type="submit" disabled={!newMessage.trim()} className="absolute right-2 p-3 bg-blue-600 rounded-xl hover:bg-blue-500 disabled:opacity-30 transition-all active:scale-95">
