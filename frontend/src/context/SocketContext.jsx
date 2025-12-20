@@ -1,70 +1,88 @@
-import React, { createContext, useContext, useEffect, useState } from 'react';
-import { io } from 'socket.io-client';
-import { useAuth } from './AuthContext';
+import React, { useEffect, useState } from 'react';
+import { useSocket } from '../context/SocketContext'; // Using your context
+import axios from 'axios';
 
-const SocketContext = createContext();
+export default function Sidebar({ onSelectChat, selectedChatId }) {
+  const [conversations, setConversations] = useState([]);
+  const { socket } = useSocket();
 
-export const useSocket = () => useContext(SocketContext);
+  const API_URL = import.meta.env.VITE_BACKEND_URL || "http://localhost:5000";
 
-export const SocketProvider = ({ children }) => {
-  const { user } = useAuth();
-  const [socket, setSocket] = useState(null);
-  const [onlineUsers, setOnlineUsers] = useState([]);
-
+  // 1. Initial Load of conversations
   useEffect(() => {
-    const API_URL = import.meta.env.VITE_BACKEND_URL || "http://localhost:5000";
-    
-    if (user) {
-      // 1. Initialize connection with better stability settings
-      const newSocket = io(API_URL, {
-        withCredentials: true,
-        query: { userId: user._id },
-        transports: ['websocket'], // Prioritize websocket for speed
-        reconnectionAttempts: 5,
-      });
+    const fetchChats = async () => {
+      try {
+        const res = await axios.get(`${API_URL}/api/chats`, { withCredentials: true });
+        setConversations(res.data);
+      } catch (err) { console.error("Sidebar load error:", err); }
+    };
+    fetchChats();
+  }, [API_URL]);
 
-      setSocket(newSocket);
+  // 2. The "Live" Magic: Listen for new messages
+  useEffect(() => {
+    if (!socket) return;
 
-      // 2. Initial Setup
-      newSocket.on('connect', () => {
-        console.log("Connected to Aether Signal Grid");
-        newSocket.emit('user_online', user._id);
-      });
+    const handleUpdate = (payload) => {
+      setConversations((prev) => {
+        // Find the index of the chat that received a message
+        const index = prev.findIndex(c => c._id === payload.chatId);
 
-      // 3. LISTEN: Get the full list of online users
-      newSocket.on('online_users_list', (users) => {
-        setOnlineUsers(users);
-      });
+        if (index !== -1) {
+          // CLONE AND UPDATE: Move existing chat to top
+          const updatedList = [...prev];
+          const chatToUpdate = { ...updatedList[index] };
 
-      // 4. LISTEN: Real-time status changes
-      newSocket.on('user_status_change', ({ userId, isOnline }) => {
-        setOnlineUsers(prev => {
-          if (isOnline) {
-            return prev.includes(userId) ? prev : [...prev, userId];
+          // Update message preview
+          chatToUpdate.lastMessage = payload;
+          
+          // Increment unread count ONLY if we aren't currently looking at that chat
+          if (selectedChatId !== payload.chatId) {
+            chatToUpdate.unreadCount = (chatToUpdate.unreadCount || 0) + 1;
           }
-          return prev.filter(id => id !== userId);
-        });
-      });
 
-      // 5. Cleanup on logout/unmount
-      return () => {
-        newSocket.off('connect');
-        newSocket.off('online_users_list');
-        newSocket.off('user_status_change');
-        newSocket.disconnect(); // Use disconnect for a cleaner exit
-        setSocket(null);
-      };
-    } else {
-      if (socket) {
-        socket.disconnect();
-        setSocket(null);
-      }
-    }
-  }, [user]);
+          // Move to index 0 (Top of the sidebar)
+          updatedList.splice(index, 1);
+          return [chatToUpdate, ...updatedList];
+        } else {
+          // NEW CONVERSATION: If someone new messages you, 
+          // fetch the sidebar again to get the full chat object
+          fetchSidebarData(); 
+          return prev;
+        }
+      });
+    };
+
+    const fetchSidebarData = async () => {
+        const res = await axios.get(`${API_URL}/api/chats`, { withCredentials: true });
+        setConversations(res.data);
+    };
+
+    // Listen for events from your socketHandler.js
+    socket.on('sidebar_update', handleUpdate);
+    socket.on('receive_message', handleUpdate);
+
+    return () => {
+      socket.off('sidebar_update', handleUpdate);
+      socket.off('receive_message', handleUpdate);
+    };
+  }, [socket, selectedChatId, API_URL]);
 
   return (
-    <SocketContext.Provider value={{ socket, onlineUsers }}>
-      {children}
-    </SocketContext.Provider>
+    <div className="sidebar-container">
+      {conversations.map((chat) => (
+        <div 
+          key={chat._id}
+          onClick={() => onSelectChat(chat)}
+          className={`chat-item ${selectedChatId === chat._id ? 'active' : ''}`}
+        >
+          <div className="chat-info">
+            <span className="name">{chat.participants[0].username}</span>
+            {chat.unreadCount > 0 && <span className="badge">{chat.unreadCount}</span>}
+          </div>
+          <p className="preview">{chat.lastMessage?.text}</p>
+        </div>
+      ))}
+    </div>
   );
-};
+}

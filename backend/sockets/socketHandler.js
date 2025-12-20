@@ -27,30 +27,29 @@ export const setupSocketEvents = (io) => {
             socket.leave(chatId.toString());
         });
 
-        // 3. Messages (Now using the Controller Logic)
+        // 3. Messages
         socket.on('send_message', async (data) => {
             const { chatId, senderId, recipientId, text, _id: tempId } = data;
 
             try {
-                // This function handles finding OR creating buckets for BOTH users
                 const savedMsg = await saveMessageToBucket(chatId, senderId, text);
 
                 const messagePayload = {
                     ...data,
-                    _id: savedMsg._id, // Real MongoDB ID
+                    _id: savedMsg._id, 
                     timestamp: savedMsg.timestamp
                 };
 
-                // Broadcast to others in the room
+                // Emit to the specific room
                 socket.to(chatId.toString()).emit('receive_message', messagePayload);
 
-                // Send REAL ID back to sender to fix their Trash Can/Delete button
+                // Acknowledge back to sender
                 socket.emit('message_ack', { 
                     tempId: tempId, 
                     realId: savedMsg._id 
                 });
 
-                // Update Sidebar for recipient
+                // Update Sidebar for recipient (if they aren't in the active chat room)
                 const recipientSocketId = onlineUsers.get(recipientId);
                 if (recipientSocketId) {
                     io.to(recipientSocketId).emit('sidebar_update', messagePayload);
@@ -62,14 +61,17 @@ export const setupSocketEvents = (io) => {
             }
         });
 
-        // 4. Typing
+        // 4. Typing Status
         socket.on('typing', ({ chatId, typing }) => {
             socket.to(chatId.toString()).emit('typing_status', { chatId, typing });
         });
 
-        // 5. Deletion Sync
+        // 5. Deletion Sync (MODIFIED)
+        // We only call this when the frontend receives { action: "unsend" } from the API
         socket.on('delete_message', ({ chatId, messageId }) => {
-            socket.broadcast.to(chatId.toString()).emit('message_deleted', { messageId });
+            console.log(`🗑️ Global Unsend: ${messageId} in ${chatId}`);
+            // This ensures the other user's UI removes the message in real-time
+            socket.to(chatId.toString()).emit('message_deleted', { messageId });
         });
 
         socket.on('disconnect', async () => {

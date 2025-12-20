@@ -4,11 +4,15 @@ import { Search, UserPlus, Loader2, MessageSquarePlus, MoreVertical, Trash2, Shi
 import { useSocket } from '../src/context/SocketContext';
 import { useAuth } from '../src/context/AuthContext';
 
-// --- Sub-Component: ChatItem (Optimized with Memo) ---
+// --- Sub-Component: ChatItem (Optimized) ---
 const ChatItem = memo(({ chat, isActive, isOnline, onClick, formatTime, currentUser, onDelete }) => {
   const [showMenu, setShowMenu] = useState(false);
   const menuRef = useRef();
-  const otherUser = chat.participants.find(p => p._id !== currentUser?._id);
+  
+  // Safely find the other participant
+  const otherUser = useMemo(() => 
+    chat.participants?.find(p => p._id !== currentUser?._id), 
+  [chat.participants, currentUser?._id]);
 
   useEffect(() => {
     const close = (e) => { if (menuRef.current && !menuRef.current.contains(e.target)) setShowMenu(false); };
@@ -45,7 +49,9 @@ const ChatItem = memo(({ chat, isActive, isOnline, onClick, formatTime, currentU
           <h3 className={`font-bold truncate text-[14px] ${isActive ? 'text-white' : 'text-zinc-200'}`}>
             {otherUser?.username || "Unknown User"}
           </h3>
-          <span className="text-[10px] text-zinc-500 font-medium whitespace-nowrap">{formatTime(chat.updatedAt)}</span>
+          <span className="text-[10px] text-zinc-500 font-medium whitespace-nowrap">
+            {chat.updatedAt ? formatTime(chat.updatedAt) : ""}
+          </span>
         </div>
         
         <div className="flex justify-between items-center">
@@ -111,7 +117,7 @@ export default function Sidebar({ setSelectedChat, selectedChat }) {
     fetchChats();
   }, [API_URL]);
 
-  // 2. Search Users Logic
+  // 2. Search Users Logic (unchanged)
   useEffect(() => {
     const searchUsers = async () => {
       if (search.trim().length < 2) { setSearchResults([]); return; }
@@ -126,7 +132,7 @@ export default function Sidebar({ setSelectedChat, selectedChat }) {
     return () => clearTimeout(debounce);
   }, [search, API_URL]);
 
-  // 3. Start/Access Chat
+  // 3. Action Handlers
   const startNewChat = async (recipientId) => {
     try {
       const res = await axios.post(`${API_URL}/api/chats/access`, { recipientId }, { withCredentials: true });
@@ -151,6 +157,7 @@ export default function Sidebar({ setSelectedChat, selectedChat }) {
 
   const handleChatClick = useCallback((chat) => {
     setSelectedChat(chat);
+    // Reset unread count locally for immediate feedback
     setConversations(prev => prev.map(c => c._id === chat._id ? { ...c, unreadCount: 0 } : c));
   }, [setSelectedChat]);
 
@@ -160,51 +167,62 @@ export default function Sidebar({ setSelectedChat, selectedChat }) {
     return msgDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   };
 
-  // 4. SOCKET LISTENERS: Real-time Updates & Deletion Sync
+  // 4. THE LIVE UPDATE LOGIC
   useEffect(() => {
     if (!socket) return;
 
-    // A. Handle Incoming Messages (Update Last Message & Sort)
     const handleUpdate = (msg) => {
       setConversations(prev => {
         const idx = prev.findIndex(c => c._id === msg.chatId);
+        
         if (idx !== -1) {
-          const updated = { ...prev[idx], lastMessage: msg, updatedAt: new Date().toISOString() };
+          // Existing chat: update it and move to top
+          const updatedChat = { 
+            ...prev[idx], 
+            lastMessage: msg, 
+            updatedAt: new Date().toISOString() 
+          };
+
+          // Increment unread if not the current open chat
           if (selectedChat?._id !== msg.chatId && msg.senderId !== currentUser?._id) {
-            updated.unreadCount = (updated.unreadCount || 0) + 1;
+            updatedChat.unreadCount = (updatedChat.unreadCount || 0) + 1;
           }
-          return [updated, ...prev.filter((_, i) => i !== idx)];
+
+          const filtered = prev.filter(c => c._id !== msg.chatId);
+          return [updatedChat, ...filtered];
         } else {
-            // If the chat isn't in sidebar (hidden), we should re-fetch sidebar
-            // to get the full chat object with participants.
-            axios.get(`${API_URL}/api/chats`, { withCredentials: true })
-                 .then(res => setConversations(res.data));
-            return prev;
+          // Brand new chat: re-fetch to get the full participant objects
+          axios.get(`${API_URL}/api/chats`, { withCredentials: true })
+               .then(res => setConversations(res.data));
+          return prev;
         }
       });
     };
 
-    // B. Handle Message Deletion (Update Sidebar Preview)
     const handleDeleteSync = ({ messageId }) => {
       setConversations(prev => prev.map(c => {
         if (c.lastMessage?._id === messageId) {
-          return { ...c, lastMessage: { ...c.lastMessage, text: "Message deleted" } };
+          return { ...c, lastMessage: { ...c.lastMessage, text: "Signal withdrawn" } };
         }
         return c;
       }));
     };
 
+    // Listen to both events
+    socket.on('sidebar_update', handleUpdate);
     socket.on('receive_message', handleUpdate);
     socket.on('message_deleted', handleDeleteSync);
 
     return () => {
+      socket.off('sidebar_update', handleUpdate);
       socket.off('receive_message', handleUpdate);
       socket.off('message_deleted', handleDeleteSync);
     };
-  }, [socket, selectedChat, currentUser, API_URL]);
+  }, [socket, selectedChat?._id, currentUser?._id, API_URL]);
 
   return (
     <div className="flex flex-col h-full bg-[#070707] border-r border-white/5 w-[360px] relative">
+      {/* Search and Header Section */}
       <div className="p-6 pb-4">
         <div className="flex justify-between items-center mb-6">
           <h2 className="text-xl font-black italic tracking-tighter text-white uppercase">Aether</h2>
@@ -245,6 +263,7 @@ export default function Sidebar({ setSelectedChat, selectedChat }) {
         </div>
       )}
 
+      {/* Conversations List */}
       <div className="flex-1 overflow-y-auto mt-2 custom-scrollbar">
         {loading ? (
           <div className="p-6 space-y-4">
@@ -257,7 +276,7 @@ export default function Sidebar({ setSelectedChat, selectedChat }) {
               chat={chat}
               currentUser={currentUser}
               isActive={selectedChat?._id === chat._id}
-              isOnline={onlineUsers.includes(chat.participants.find(p => p._id !== currentUser?._id)?._id)}
+              isOnline={onlineUsers.includes(chat.participants?.find(p => p._id !== currentUser?._id)?._id)}
               onClick={() => handleChatClick(chat)}
               formatTime={formatTime}
               onDelete={deleteConversationLocally}

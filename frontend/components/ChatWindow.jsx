@@ -12,7 +12,7 @@ export default function ChatWindow({ chat }) {
   const [isTyping, setIsTyping] = useState(false);
   const [otherUserTyping, setOtherUserTyping] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
-  const [isDeleting, setIsDeleting] = useState(null); // Track which message is deleting
+  const [isDeleting, setIsDeleting] = useState(null); 
   
   const scrollRef = useRef();
   const menuRef = useRef();
@@ -24,7 +24,6 @@ export default function ChatWindow({ chat }) {
   const isOtherUserOnline = onlineUsers.includes(otherUser?._id);
   const API_URL = useMemo(() => import.meta.env.VITE_BACKEND_URL || "http://localhost:5000", []);
 
-  // Close menu on click outside
   useEffect(() => {
     const closeMenu = (e) => {
       if (menuRef.current && !menuRef.current.contains(e.target)) setShowMenu(false);
@@ -89,7 +88,6 @@ export default function ChatWindow({ chat }) {
     };
   }, [socket, chat._id]);
 
-  // Auto-scroll
   useEffect(() => {
     scrollRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, otherUserTyping]);
@@ -112,7 +110,6 @@ export default function ChatWindow({ chat }) {
       _id: tempId 
     };
 
-    // Optimistic Update
     setMessages((prev) => [...prev, msgData]); 
     socket.emit('send_message', msgData);
     
@@ -128,10 +125,10 @@ export default function ChatWindow({ chat }) {
     try {
       const res = await axios.delete(`${API_URL}/api/chats/${chat._id}/message/${messageId}`, { withCredentials: true });
       
-      // Remove locally
+      // Update UI locally
       setMessages(prev => prev.filter(m => m._id !== messageId));
       
-      // If it was an "Unsend", tell the other person via socket
+      // BROADCAST: If the backend says "unsend", tell everyone in the room
       if (res.data.action === "unsend") {
         socket.emit('delete_message', { chatId: chat._id, messageId });
       }
@@ -217,11 +214,13 @@ export default function ChatWindow({ chat }) {
               <div className={`group flex flex-col ${isMe ? 'items-end' : 'items-start'} ${showTime ? 'mb-4' : 'mb-0.5'}`}>
                 <div className={`flex items-center gap-2 max-w-[85%] ${isMe ? 'flex-row' : 'flex-row-reverse'}`}>
                   
-                  {isMe && m._id && !m._id.startsWith('temp-') && (
+                  {/* Delete button: Visible for both now (Sender = Unsend, Receiver = Delete for Me) */}
+                  {m._id && !m._id.toString().startsWith('temp-') && (
                     <button 
                       onClick={() => deleteMsg(m._id)}
                       disabled={isDeleting === m._id}
-                      className="opacity-0 group-hover:opacity-100 p-2 hover:bg-white/5 rounded-full transition-all text-zinc-600 hover:text-red-500 disabled:opacity-50"
+                      className={`opacity-0 group-hover:opacity-100 p-2 hover:bg-white/5 rounded-full transition-all text-zinc-600 hover:text-red-500 disabled:opacity-50`}
+                      title={isMe ? "Unsend message" : "Delete for me"}
                     >
                       {isDeleting === m._id ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
                     </button>
