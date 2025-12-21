@@ -17,6 +17,7 @@ export default function ChatWindow({ chat }) {
   const scrollRef = useRef();
   const menuRef = useRef();
 
+  // Safely find the recipient
   const otherUser = useMemo(() => 
     chat.participants.find(p => p._id !== user._id), 
   [chat, user._id]);
@@ -24,6 +25,7 @@ export default function ChatWindow({ chat }) {
   const isOtherUserOnline = onlineUsers.includes(otherUser?._id);
   const API_URL = useMemo(() => import.meta.env.VITE_BACKEND_URL || "http://localhost:5000", []);
 
+  // Close context menu on click outside
   useEffect(() => {
     const closeMenu = (e) => {
       if (menuRef.current && !menuRef.current.contains(e.target)) setShowMenu(false);
@@ -46,7 +48,7 @@ export default function ChatWindow({ chat }) {
     return () => socket?.emit('leave_chat', chat._id);
   }, [chat._id, socket, API_URL]);
 
-  // 2. Real-time Listeners
+  // 2. Real-time Socket Listeners
   useEffect(() => {
     if (!socket) return;
 
@@ -62,6 +64,7 @@ export default function ChatWindow({ chat }) {
     };
 
     const handleDelete = ({ messageId }) => {
+      // This only triggers when the OTHER person unsends THEIR message
       setMessages((prev) => prev.filter(m => m._id !== messageId));
     };
 
@@ -88,6 +91,7 @@ export default function ChatWindow({ chat }) {
     };
   }, [socket, chat._id]);
 
+  // Auto-scroll to bottom
   useEffect(() => {
     scrollRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, otherUserTyping]);
@@ -125,15 +129,16 @@ export default function ChatWindow({ chat }) {
     try {
       const res = await axios.delete(`${API_URL}/api/chats/${chat._id}/message/${messageId}`, { withCredentials: true });
       
-      // Update UI locally
+      // Update UI locally for current user
       setMessages(prev => prev.filter(m => m._id !== messageId));
       
-      // BROADCAST: If the backend says "unsend", tell everyone in the room
+      // If backend confirms "unsend", notify the other participant via socket
       if (res.data.action === "unsend") {
         socket.emit('delete_message', { chatId: chat._id, messageId });
       }
+      // Note: If action is "delete", we don't emit anything (Delete for Me logic)
     } catch (err) { 
-        console.error("Delete failed"); 
+        console.error("Delete operation failed"); 
     } finally {
         setIsDeleting(null);
     }
@@ -167,7 +172,7 @@ export default function ChatWindow({ chat }) {
         <div className="flex items-center gap-4">
           <div className="relative">
             <div className="w-10 h-10 bg-zinc-900 rounded-full flex items-center justify-center border border-white/10 font-bold text-blue-500">
-              {otherUser?.username?.[0].toUpperCase()}
+              {otherUser?.username?.[0].toUpperCase() || "?"}
             </div>
             {isOtherUserOnline && <div className="absolute -bottom-0.5 -right-0.5 w-3 h-3 bg-green-500 rounded-full border-2 border-[#050505]" />}
           </div>
@@ -214,15 +219,19 @@ export default function ChatWindow({ chat }) {
               <div className={`group flex flex-col ${isMe ? 'items-end' : 'items-start'} ${showTime ? 'mb-4' : 'mb-0.5'}`}>
                 <div className={`flex items-center gap-2 max-w-[85%] ${isMe ? 'flex-row' : 'flex-row-reverse'}`}>
                   
-                  {/* Delete button: Visible for both now (Sender = Unsend, Receiver = Delete for Me) */}
+                  {/* Delete button: Now visible for BOTH your messages and theirs */}
                   {m._id && !m._id.toString().startsWith('temp-') && (
                     <button 
                       onClick={() => deleteMsg(m._id)}
                       disabled={isDeleting === m._id}
-                      className={`opacity-0 group-hover:opacity-100 p-2 hover:bg-white/5 rounded-full transition-all text-zinc-600 hover:text-red-500 disabled:opacity-50`}
-                      title={isMe ? "Unsend message" : "Delete for me"}
+                      className={`opacity-0 group-hover:opacity-100 p-2 hover:bg-white/5 rounded-full transition-all text-zinc-600 hover:text-red-500 disabled:opacity-50 ${isMe ? 'order-first' : 'order-last'}`}
+                      title={isMe ? "Unsend for everyone" : "Delete for me only"}
                     >
-                      {isDeleting === m._id ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
+                      {isDeleting === m._id ? (
+                        <Loader2 className="w-3 h-3 animate-spin" />
+                      ) : (
+                        <Trash2 className="w-3.5 h-3.5" />
+                      )}
                     </button>
                   )}
 
