@@ -1,7 +1,7 @@
 import Conversation from "../models/Conversation.js";
 import MessageBucket from "../models/MessageBucket.js";
 import User from "../models/User.js";
-import { getIO } from "../socket/socketHandler.js"; // Ensure this path is correct
+import { getIO } from "../sockets/socketHandler.js"; // Ensure this path is correct
 
 /**
  * @desc    Access or Create a 1-on-1 Conversation

@@ -5,7 +5,7 @@ import {
   getConversations,
   searchUsers,
   deleteMessage, // New
-  clearHistory,  // New
+  // clearHistory,  // New
   deleteChat     // New
 } from '../controllers/chatController.js';
 import { protect } from '../middleware/authMiddleware.js';
@@ -24,7 +24,7 @@ router.post('/access', protect, accessConversation);
 router.delete('/:chatId/message/:messageId', protect, deleteMessage);
 
 // Clear history for the requester only (Dual-bucket wipe)
-router.delete('/:chatId/clear', protect, clearHistory);
+// router.delete('/:chatId/clear', protect, clearHistory);
 
 // Remove the chat from the sidebar entirely
 router.delete('/:chatId', protect, deleteChat);
