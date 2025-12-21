@@ -1,6 +1,7 @@
 import Conversation from "../models/Conversation.js";
 import MessageBucket from "../models/MessageBucket.js";
 import User from "../models/User.js";
+import { getIO } from "../socket/socketHandler.js"; // Ensure this path is correct
 
 /**
  * @desc    Access or Create a 1-on-1 Conversation
@@ -24,13 +25,11 @@ export const accessConversation = async (req, res) => {
       });
       chat = await chat.populate("participants", "username email status");
     } else {
-      // Logic: Re-add user to participants if they previously "deleted" (left) the chat
       const participantsStr = chat.participants.map(p => p._id.toString());
       if (!participantsStr.includes(senderId)) {
         await Conversation.findByIdAndUpdate(chat._id, {
           $push: { participants: senderId }
         });
-        // Re-fetch to get updated participants
         chat = await Conversation.findById(chat._id).populate("participants", "username email status");
       }
     }
@@ -56,7 +55,6 @@ export const getConversations = async (req, res) => {
 
     const formattedChats = chats.map(chat => {
       const chatObj = chat.toObject();
-      // Ensure unreadCount logic works whether it's a Map or Plain Object
       const countMap = chat.unreadCount instanceof Map ? Object.fromEntries(chat.unreadCount) : chat.unreadCount;
       chatObj.unreadCount = countMap ? (countMap[userId] || 0) : 0;
       return chatObj;
@@ -89,8 +87,6 @@ export const getMessages = async (req, res) => {
     .lean();
 
     if (!buckets.length) return res.status(200).json([]);
-
-    // Flatten all pages of messages into a single timeline
     const allMessages = buckets.reduce((acc, bucket) => [...acc, ...bucket.messages], []);
 
     res.status(200).json(allMessages);
@@ -100,7 +96,7 @@ export const getMessages = async (req, res) => {
 };
 
 /**
- * @desc    Save message to DUAL-BUCKETS
+ * @desc    Save message to DUAL-BUCKETS and Trigger Sidebar Update
  */
 export const saveMessageToBucket = async (chatId, senderId, text) => {
   try {
@@ -112,7 +108,6 @@ export const saveMessageToBucket = async (chatId, senderId, text) => {
     const messageData = { senderId, text, timestamp };
 
     const savePromises = participants.map(async (ownerId) => {
-      // Find latest bucket with space (max 50 messages)
       let bucket = await MessageBucket.findOneAndUpdate(
         { 
           conversationId: chatId, 
@@ -123,7 +118,6 @@ export const saveMessageToBucket = async (chatId, senderId, text) => {
         { sort: { page: -1 }, new: true }
       );
 
-      // Create new page bucket if full or non-existent
       if (!bucket) {
         const lastBucket = await MessageBucket.findOne({ 
           conversationId: chatId, 
@@ -142,12 +136,10 @@ export const saveMessageToBucket = async (chatId, senderId, text) => {
     });
 
     const savedBuckets = await Promise.all(savePromises);
-    
-    // Return the message with the ID generated in the sender's bucket
     const senderBucket = savedBuckets.find(b => b.ownerId.toString() === senderId.toString());
     const savedMsg = senderBucket.messages[senderBucket.messages.length - 1];
 
-    // Update Conversation metadata for the Sidebar preview
+    // Update Conversation metadata
     const recipientIds = participants.filter(p => p !== senderId.toString());
     const updateQuery = {
       lastMessage: savedMsg,
@@ -161,6 +153,16 @@ export const saveMessageToBucket = async (chatId, senderId, text) => {
 
     await Conversation.findByIdAndUpdate(chatId, updateQuery);
 
+    // LIVE UPDATE: Notify all participants to move this chat to the top
+    const io = getIO();
+    io.to(chatId).emit('sidebar_update', {
+      chatId,
+      senderId,
+      text,
+      _id: savedMsg._id,
+      timestamp
+    });
+
     return savedMsg; 
   } catch (error) {
     console.error("Save Message Error:", error);
@@ -169,11 +171,12 @@ export const saveMessageToBucket = async (chatId, senderId, text) => {
 };
 
 /**
- * @desc    Delete a message (Unsend for all vs Delete for Me)
+ * @desc    Delete message with Live Sync
  */
 export const deleteMessage = async (req, res) => {
   const { chatId, messageId } = req.params;
   const userId = req.user._id.toString();
+  const io = getIO();
 
   try {
     const bucket = await MessageBucket.findOne({
@@ -188,27 +191,36 @@ export const deleteMessage = async (req, res) => {
     const isSender = message.senderId.toString() === userId;
 
     if (isSender) {
-      // --- UNSEND: Remove from ALL buckets (matching by content/time) ---
+      // UNSEND: Remove from ALL buckets
       await MessageBucket.updateMany(
         { conversationId: chatId },
         { $pull: { messages: { 
           senderId: message.senderId, 
-          timestamp: message.timestamp,
-          text: message.text 
+          timestamp: message.timestamp 
         } } }
       );
 
-      // Update Sidebar if this was the last message
+      // Tell all clients to remove this message from the UI
+      io.to(chatId).emit('message_deleted', { messageId, chatId });
+
+      // Update Sidebar Preview if it was the last message
       const chat = await Conversation.findById(chatId);
-      if (chat.lastMessage && chat.lastMessage.timestamp.getTime() === message.timestamp.getTime()) {
+      if (chat.lastMessage?.timestamp?.getTime() === message.timestamp.getTime()) {
         await Conversation.findByIdAndUpdate(chatId, {
           "lastMessage.text": "Signal withdrawn"
+        });
+        
+        // Push "Signal withdrawn" to sidebar preview
+        io.to(chatId).emit('sidebar_update', {
+          chatId,
+          text: "Signal withdrawn",
+          timestamp: new Date()
         });
       }
 
       return res.status(200).json({ action: "unsend" });
     } else {
-      // --- DELETE FOR ME: Remove only from requester's bucket ---
+      // DELETE FOR ME: Remove only from requester's bucket
       await MessageBucket.updateOne(
         { conversationId: chatId, ownerId: userId },
         { $pull: { messages: { _id: messageId } } }
@@ -221,21 +233,6 @@ export const deleteMessage = async (req, res) => {
 };
 
 /**
- * @desc    Clear entire local history
- */
-export const clearHistory = async (req, res) => {
-  const { chatId } = req.params;
-  const userId = req.user._id;
-
-  try {
-    await MessageBucket.deleteMany({ conversationId: chatId, ownerId: userId });
-    res.status(200).json({ message: "History cleared locally" });
-  } catch (error) {
-    res.status(500).json({ message: "Error clearing history" });
-  }
-};
-
-/**
  * @desc    Delete Conversation (Remove from Sidebar + Wipe)
  */
 export const deleteChat = async (req, res) => {
@@ -243,9 +240,7 @@ export const deleteChat = async (req, res) => {
   const userId = req.user._id;
 
   try {
-    // Wipe current user's message copies
     await MessageBucket.deleteMany({ conversationId: chatId, ownerId: userId });
-    // Remove user from participants list so it hides from their Sidebar
     await Conversation.findByIdAndUpdate(chatId, {
       $pull: { participants: userId }
     });

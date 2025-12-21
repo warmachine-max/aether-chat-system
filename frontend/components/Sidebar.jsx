@@ -4,12 +4,10 @@ import { Search, UserPlus, Loader2, MessageSquarePlus, MoreVertical, Trash2, Shi
 import { useSocket } from '../src/context/SocketContext';
 import { useAuth } from '../src/context/AuthContext';
 
-// --- Sub-Component: ChatItem (Optimized for performance) ---
 const ChatItem = memo(({ chat, isActive, isOnline, onClick, formatTime, currentUser, onDelete }) => {
   const [showMenu, setShowMenu] = useState(false);
   const menuRef = useRef();
   
-  // Identify the recipient (the person who is NOT the current user)
   const otherUser = useMemo(() => 
     chat.participants?.find(p => p._id !== currentUser?._id), 
   [chat.participants, currentUser?._id]);
@@ -19,12 +17,6 @@ const ChatItem = memo(({ chat, isActive, isOnline, onClick, formatTime, currentU
     document.addEventListener('mousedown', close);
     return () => document.removeEventListener('mousedown', close);
   }, []);
-
-  const handleAction = (e, action) => {
-    e.stopPropagation(); 
-    setShowMenu(false);
-    action();
-  };
 
   return (
     <div 
@@ -71,7 +63,7 @@ const ChatItem = memo(({ chat, isActive, isOnline, onClick, formatTime, currentU
               {showMenu && (
                 <div className="absolute right-0 bottom-full mb-2 w-44 bg-zinc-900 border border-white/10 rounded-xl shadow-2xl z-[100] overflow-hidden backdrop-blur-xl">
                   <button 
-                    onClick={(e) => handleAction(e, () => onDelete(chat._id))}
+                    onClick={(e) => { e.stopPropagation(); onDelete(chat._id); setShowMenu(false); }}
                     className="w-full flex items-center gap-3 px-4 py-3 text-left text-[10px] text-red-500 hover:bg-red-500/10 transition-colors font-black uppercase tracking-widest"
                   >
                     <Trash2 className="w-3.5 h-3.5" />
@@ -93,7 +85,6 @@ const ChatItem = memo(({ chat, isActive, isOnline, onClick, formatTime, currentU
   );
 });
 
-// --- Main Sidebar Component ---
 export default function Sidebar({ setSelectedChat, selectedChat }) {
   const { user: currentUser } = useAuth();
   const { socket, onlineUsers } = useSocket();
@@ -104,9 +95,14 @@ export default function Sidebar({ setSelectedChat, selectedChat }) {
   const [isSearching, setIsSearching] = useState(false);
   const [loading, setLoading] = useState(true);
 
+  // Use a Ref for the current selectedChat to avoid stale closure in socket listeners
+  const selectedChatRef = useRef(selectedChat);
+  useEffect(() => {
+    selectedChatRef.current = selectedChat;
+  }, [selectedChat]);
+
   const API_URL = useMemo(() => import.meta.env.VITE_BACKEND_URL || "http://localhost:5000", []);
 
-  // helper to fetch list
   const fetchSidebarData = useCallback(async () => {
     try {
       const res = await axios.get(`${API_URL}/api/chats`, { withCredentials: true });
@@ -134,7 +130,6 @@ export default function Sidebar({ setSelectedChat, selectedChat }) {
     return () => clearTimeout(debounce);
   }, [search, API_URL]);
 
-  // User Actions
   const startNewChat = async (recipientId) => {
     try {
       const res = await axios.post(`${API_URL}/api/chats/access`, { recipientId }, { withCredentials: true });
@@ -159,7 +154,7 @@ export default function Sidebar({ setSelectedChat, selectedChat }) {
     setConversations(prev => prev.map(c => c._id === chat._id ? { ...c, unreadCount: 0 } : c));
   }, [setSelectedChat]);
 
-  // 4. Live Socket Listeners
+  // --- Live Socket Listeners (FIXED) ---
   useEffect(() => {
     if (!socket) return;
 
@@ -168,32 +163,31 @@ export default function Sidebar({ setSelectedChat, selectedChat }) {
         const idx = prev.findIndex(c => c._id === msg.chatId);
         
         if (idx !== -1) {
-          // CLONE AND UPDATE: Logic you wanted
           const updatedChat = { 
             ...prev[idx], 
             lastMessage: msg, 
             updatedAt: new Date().toISOString() 
           };
 
-          // Increment badge if chat is not open AND you are not the sender
-          if (selectedChat?._id !== msg.chatId && msg.senderId !== currentUser?._id) {
+          // Use Ref to check if chat is active to avoid stale logic
+          if (selectedChatRef.current?._id !== msg.chatId && msg.senderId !== currentUser?._id) {
             updatedChat.unreadCount = (updatedChat.unreadCount || 0) + 1;
           }
 
-          // Filter out the old version and put the updated one at the TOP
           const filtered = prev.filter(c => c._id !== msg.chatId);
           return [updatedChat, ...filtered];
         } else {
-          // If brand new conversation from someone else, re-fetch list
+          // If the chat isn't in the list, refresh everything
           fetchSidebarData();
           return prev;
         }
       });
     };
 
-    const handleGlobalDelete = ({ messageId }) => {
+    const handleGlobalDelete = (payload) => {
+      // payload should contain { chatId, messageId }
       setConversations(prev => prev.map(c => {
-        if (c.lastMessage?._id === messageId) {
+        if (c.lastMessage?._id === payload.messageId) {
           return { ...c, lastMessage: { ...c.lastMessage, text: "Signal withdrawn" } };
         }
         return c;
@@ -207,7 +201,7 @@ export default function Sidebar({ setSelectedChat, selectedChat }) {
       socket.off('sidebar_update', handleUpdate);
       socket.off('message_deleted', handleGlobalDelete);
     };
-  }, [socket, selectedChat?._id, currentUser?._id, fetchSidebarData]);
+  }, [socket, currentUser?._id, fetchSidebarData]); 
 
   return (
     <div className="flex flex-col h-full bg-[#070707] border-r border-white/5 w-[360px] relative select-none">
@@ -231,7 +225,6 @@ export default function Sidebar({ setSelectedChat, selectedChat }) {
         </div>
       </div>
 
-      {/* Floating Search Dropdown */}
       {search.length > 0 && (
         <div className="absolute top-[135px] left-4 right-4 bg-zinc-900 border border-white/10 rounded-2xl shadow-2xl z-[150] max-h-[400px] overflow-hidden backdrop-blur-2xl flex flex-col">
           {isSearching ? (
@@ -255,7 +248,6 @@ export default function Sidebar({ setSelectedChat, selectedChat }) {
         </div>
       )}
 
-      {/* Main List */}
       <div className="flex-1 overflow-y-auto mt-2 custom-scrollbar">
         {loading ? (
           <div className="p-6 space-y-4">

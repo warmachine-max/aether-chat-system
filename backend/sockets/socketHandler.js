@@ -1,13 +1,16 @@
 import { saveMessageToBucket } from '../controllers/chatController.js'; 
 import User from '../models/User.js';
 
+let ioInstance; // To store the io instance for the controller to use
+
 export const setupSocketEvents = (io) => {
+    ioInstance = io; // Set the instance
     const onlineUsers = new Map(); 
 
     io.on('connection', (socket) => {
         console.log(`📡 Signal Established: ${socket.id}`);
 
-        // 1. User Presence & Status
+        // 1. User Presence
         socket.on('user_online', async (userId) => {
             if (!userId) return;
             socket.userId = userId;
@@ -15,7 +18,6 @@ export const setupSocketEvents = (io) => {
 
             await User.findByIdAndUpdate(userId, { "status.isOnline": true });
             
-            // Broadcast the new online list to everyone
             io.emit('online_users_list', Array.from(onlineUsers.keys()));
             socket.broadcast.emit('user_status_change', { userId, isOnline: true });
         });
@@ -31,12 +33,12 @@ export const setupSocketEvents = (io) => {
             console.log(`👤 User left room: ${chatId}`);
         });
 
-        // 3. Real-time Messaging (Dual-Bucket Sync)
+        // 3. Real-time Messaging
         socket.on('send_message', async (data) => {
-            const { chatId, senderId, recipientId, text, _id: tempId } = data;
+            const { chatId, senderId, text, _id: tempId } = data;
 
             try {
-                // Save to the Dual-Bucket database
+                // Save to DB (The controller now handles the sidebar_update emit)
                 const savedMsg = await saveMessageToBucket(chatId, senderId, text);
 
                 const messagePayload = {
@@ -45,24 +47,17 @@ export const setupSocketEvents = (io) => {
                     timestamp: savedMsg.timestamp
                 };
 
-                // A. Update the Chat Window for the Recipient (if they are in the room)
+                // Update Chat Window for Recipient
                 socket.to(chatId.toString()).emit('receive_message', messagePayload);
 
-                // B. Acknowledge back to Sender (Replaces temp UI state with real DB data)
+                // Acknowledge back to Sender
                 socket.emit('message_ack', { 
                     tempId: tempId, 
                     realId: savedMsg._id 
                 });
 
-                // C. Update Sidebar for BOTH (Triggers the reorder and unread badge logic)
-                // To Recipient:
-                const recipientSocketId = onlineUsers.get(recipientId);
-                if (recipientSocketId) {
-                    io.to(recipientSocketId).emit('sidebar_update', messagePayload);
-                }
-                
-                // To Sender (Moves the chat to the top of their own sidebar):
-                socket.emit('sidebar_update', messagePayload);
+                // Note: We removed the manual sidebar_update here because 
+                // chatController.saveMessageToBucket now does it more reliably.
 
             } catch (err) {
                 console.error("❌ Socket Transmission Error:", err);
@@ -75,13 +70,13 @@ export const setupSocketEvents = (io) => {
             socket.to(chatId.toString()).emit('typing_status', { chatId, typing });
         });
 
-        // 5. Deletion Sync (Global Unsend)
+        // 5. Deletion Sync
         socket.on('delete_message', ({ chatId, messageId }) => {
-            // Tells the other user's ChatWindow and Sidebar to remove the message
-            socket.to(chatId.toString()).emit('message_deleted', { messageId });
+            // This handles the immediate UI removal for the other person
+            socket.to(chatId.toString()).emit('message_deleted', { messageId, chatId });
         });
 
-        // 6. Disconnection & Cleanup
+        // 6. Disconnection
         socket.on('disconnect', async () => {
             if (socket.userId) {
                 onlineUsers.delete(socket.userId);
@@ -97,4 +92,12 @@ export const setupSocketEvents = (io) => {
             }
         });
     });
+};
+
+// This allows the Controller to send signals
+export const getIO = () => {
+    if (!ioInstance) {
+        throw new Error("Socket.io not initialized!");
+    }
+    return ioInstance;
 };
